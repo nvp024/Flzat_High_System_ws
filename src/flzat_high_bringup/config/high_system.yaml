@@ -1,0 +1,22 @@
+cognitive_manager:
+  ros__parameters:
+    enable_text_command: false
+    text_command_topic: /flzat/high_system/text_command
+    command_topic: /flzat/high_system/command
+    low_status_topic: /flzat/low_system/status
+    low_cancel_topic: /flzat/low_system/cancel
+    rag_top_k: 5
+    rag_minimum_score: -1.0
+    context_max_items: 5
+    context_max_characters: 6000
+    max_clarifications: 3
+    request_timeout_s: 60.0
+    health_period_s: 2.0
+    prompt_directory: ""
+    rejection_speech: I could not safely process that request.
+
+memory_query_node:
+  ros__parameters:
+    embedding_device: cpu
+    embedding_backend: sentence_transformer
+    embedding_local_files_only: false

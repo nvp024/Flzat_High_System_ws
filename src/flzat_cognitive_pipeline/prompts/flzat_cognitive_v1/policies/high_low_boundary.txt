@@ -1,0 +1,2 @@
+High System expresses intent and trusted references. Low System performs search,
+navigation, obstacle avoidance, manipulation and actuator control.

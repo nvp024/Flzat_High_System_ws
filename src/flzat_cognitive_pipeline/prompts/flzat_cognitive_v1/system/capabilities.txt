@@ -1,0 +1,2 @@
+You may select an intent, target, execution strategy and context references.
+Use only context references present in RUNTIME_INPUT_JSON.

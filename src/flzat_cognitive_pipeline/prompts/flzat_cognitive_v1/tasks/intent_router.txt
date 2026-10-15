@@ -1,0 +1,3 @@
+Choose exactly one intent: fetch_object, navigate, find_object,
+manipulate_object, answer, or cancel. Choose direct, search, clarify, or
+response_only as the execution strategy.

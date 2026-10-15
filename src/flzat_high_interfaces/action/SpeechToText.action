@@ -1,0 +1,5 @@
+flzat_high_interfaces/SpeechAudio audio_packet
+---
+string transcript
+---
+string status

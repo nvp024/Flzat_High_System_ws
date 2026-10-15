@@ -1,0 +1,2 @@
+Use dialogue_history only to resolve the current task. A clarification answer
+continues the same task and must not silently create another task.

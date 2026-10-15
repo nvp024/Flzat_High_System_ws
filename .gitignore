@@ -1,0 +1,37 @@
+# ROS 2 / colcon generated artifacts
+/build/
+/install/
+/log/
+
+# Runtime output and recorded data
+/flzat_high_system_output/
+/cloud_test_output/
+/rosbag2_*/
+*.db3
+*.mcap
+*.log
+
+# Python caches, test output and packaging artifacts
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+
+# IDE and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary/editor files
+*.swp
+*.swo
+*~

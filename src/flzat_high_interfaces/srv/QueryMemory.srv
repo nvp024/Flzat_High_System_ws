@@ -1,0 +1,14 @@
+string query
+uint32 top_k
+string environment_id
+string map_id
+string scene
+builtin_interfaces/Time start_time
+builtin_interfaces/Time end_time
+geometry_msgs/Point center
+float32 radius_m
+---
+bool success
+flzat_high_interfaces/MemoryObject[] objects
+float32[] cosine_scores
+string error_message

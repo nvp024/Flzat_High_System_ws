@@ -1,0 +1,14 @@
+sensor_msgs/CompressedImage image
+string transcript
+string request_id
+string system_prompt
+string user_prompt
+string prompt_version
+string prompt_hash
+---
+bool success
+string request_id
+string response_text
+string error_message
+---
+string status

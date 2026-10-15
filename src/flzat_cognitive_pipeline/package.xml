@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>flzat_cognitive_pipeline</name>
+  <version>0.3.0</version>
+  <description>Task, RAG, prompt, VLM and trusted command orchestration for FLZAT</description>
+  <maintainer email="high-system@example.com">FLZAT High System</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>flzat_high_interfaces</depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

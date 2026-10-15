@@ -1,0 +1,7 @@
+{
+  "profile": "flzat_cognitive_v1",
+  "version": "1.2.0",
+  "model_family": "qwen3_vl",
+  "output_schema": "ModelDecision.v1",
+  "maximum_context_items": 5
+}

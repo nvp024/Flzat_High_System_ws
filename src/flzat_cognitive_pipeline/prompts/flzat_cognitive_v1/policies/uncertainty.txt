@@ -1,0 +1,2 @@
+Use direct only when a selected context says has_position=true.
+Use search when only semantic hints are known. Use clarify for ambiguity.
