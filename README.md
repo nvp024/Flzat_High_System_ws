@@ -1,30 +1,32 @@
 # FLZAT High System
 
-Workspace ROS 2 thống nhất cho High-Level Cognitive Pipeline:
+Unified ROS 2 workspace for the High-Level Cognitive Pipeline:
 
 ```text
 Voice → VAD → English STT → Cognitive Manager
 → read-only RAG → modular prompt → Qwen3-VL
-→ validate/normalize JSON → clarification hoặc High-Level Command
+→ validate/normalize JSON → clarification or High-Level Command
 → JSON artifact + ROS 2 topic → Low System
 ```
 
-`flzat_high_system_ws` là source chính. Các workspace cũ chỉ còn là tài liệu
-tham khảo và không phải runtime dependency.
+`flzat_high_system_ws` is the canonical source workspace. Older workspaces are
+kept only as references and are not runtime dependencies.
 
-## Cấu trúc chính
+## Workspace structure
 
-- `flzat_speech`: VAD, STT tiếng Anh, TTS.
-- `flzat_vision_context`: camera buffer và `/vision/get_frame_near`.
-- `flzat_memory`: đọc Chroma database hiện có qua `QueryMemory`.
-- `flzat_cognitive_pipeline`: manager, RAG context, prompt, validation, command.
-- `flzat_vlm`: Qwen3-VL server cho suy luận cognitive.
-- `flzat_high_bringup`: một launch production và các adapter/mock để test.
+- `flzat_speech`: VAD, English STT, and TTS.
+- `flzat_vision_context`: camera buffering and `/vision/get_frame_near`.
+- `flzat_memory`: read-only access to an existing Chroma database through
+  `QueryMemory`.
+- `flzat_cognitive_pipeline`: manager, RAG context, prompt composition,
+  validation, and command generation.
+- `flzat_vlm`: Qwen3-VL server for cognitive inference.
+- `flzat_high_bringup`: the production launch file and test adapters/mocks.
 
-Chỉ có một manager production: `cognitive_manager`. Chỉ có một prompt profile
-cho cognitive command: `flzat_cognitive_v1/manifest.json`.
+There is one production manager, `cognitive_manager`, and one canonical prompt
+profile for cognitive commands, `flzat_cognitive_v1/manifest.json`.
 
-## Cài dependency và build
+## Install dependencies and build
 
 ```bash
 conda activate py312
@@ -53,7 +55,7 @@ to the configured model IDs.
 `environment_id` and `map_id` are intentionally required launch arguments;
 there is no silent fallback to an arbitrary or newest database.
 
-## Test local không tải Qwen và không cần camera/mic
+## Local test without Qwen, a camera, or a microphone
 
 ```bash
 ros2 launch flzat_high_bringup high_system.launch.py \
@@ -68,17 +70,18 @@ ros2 launch flzat_high_bringup high_system.launch.py \
   frame_source:=static
 ```
 
-Gửi lệnh ở terminal khác:
+Send a command from another terminal:
 
 ```bash
 ros2 topic pub --once /flzat/high_system/text_command \
   std_msgs/msg/String "{data: 'get the book on the table'}"
 ```
 
-## Test full pipeline bằng ảnh có sẵn
+## Test the full pipeline with an existing image
 
-Đây vẫn là pipeline ROS 2 bình thường. Static frame server chỉ thay camera,
-không bypass RAG, Manager, PromptComposer hay output processing.
+This runs the standard ROS 2 pipeline. The static frame server replaces only
+the camera; it does not bypass RAG, the Cognitive Manager, PromptComposer, or
+output processing.
 
 ```bash
 ros2 launch flzat_high_bringup high_system.launch.py \
@@ -96,12 +99,14 @@ ros2 launch flzat_high_bringup high_system.launch.py \
   dtype:=bfloat16
 ```
 
-Copy nguyên workspace và thư mục database lên máy GPU/cloud rồi chạy chính
-những lệnh ROS 2 này; không có pipeline hoặc requirements riêng cho cloud.
+Copy this workspace and the database directory to the GPU/cloud machine, then
+run the same ROS 2 commands. There is no separate cloud pipeline or dependency
+file.
 
-## Test riêng VLM bằng ảnh + prompt
+## Test the VLM server with an image and prompt
 
-Lệnh này chỉ test model server, không test RAG/cognitive pipeline:
+This command tests only the model server; it does not test RAG or the cognitive
+pipeline:
 
 ```bash
 ros2 launch flzat_vlm vlm_server.launch.py \
@@ -122,14 +127,14 @@ ros2 launch flzat_high_bringup high_system.launch.py \
   model_id:=Qwen/Qwen3-VL-2B-Instruct
 ```
 
-Low System subscribe `/flzat/high_system/command`, publish
-`/flzat/low_system/status` và nhận `/flzat/low_system/cancel`.
+The Low System subscribes to `/flzat/high_system/command`, publishes
+`/flzat/low_system/status`, and receives `/flzat/low_system/cancel`.
 
-ID runtime dùng dạng dễ đọc: `run-20261014T153000Z`, `task-0001`,
-`task-0001-r01`, `task-0001-c01`. Artifact được lưu theo từng run để số thứ tự
-không ghi đè dữ liệu của lần khởi động trước.
+Runtime IDs use readable formats such as `run-20261014T153000Z`, `task-0001`,
+`task-0001-r01`, and `task-0001-c01`. Artifacts are stored per run so sequence
+numbers never overwrite data from a previous process invocation.
 
-`qwen3_vl` là backend production duy nhất. `audio_loopback` và
-`acceptance_client` chỉ là test tool dùng cùng ROS contract production.
+`qwen3_vl` is the only production VLM backend. `audio_loopback` and
+`acceptance_client` are test tools that use the same production ROS contracts.
 
-Xem `docs/ARCHITECTURE.md`, `docs/INTERFACES.md` và `docs/TEST_REPORT.md`.
+See `docs/ARCHITECTURE.md`, `docs/INTERFACES.md`, and `docs/TEST_REPORT.md`.
