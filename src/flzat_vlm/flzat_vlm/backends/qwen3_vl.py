@@ -127,8 +127,6 @@ class Qwen3VlBackend(VlmBackend):
     def generate(self, request: GenerationRequest) -> str:
         if self._model is None or self._processor is None:
             raise RuntimeError("Qwen3-VL backend is not loaded")
-        if not request.images:
-            raise ValueError("Qwen3-VL requires at least one image")
         system_prompt = request.system_prompt.strip()
         user_prompt = request.user_prompt.strip()
         if not system_prompt or not user_prompt:
@@ -159,30 +157,39 @@ class Qwen3VlBackend(VlmBackend):
             tokenize=False,
             add_generation_prompt=True,
         )
-        patch_size = getattr(
-            getattr(self._processor, "image_processor", None),
-            "patch_size",
-            None,
-        )
-        vision_options = {} if patch_size is None else {"image_patch_size": patch_size}
-        image_inputs, video_inputs = self._process_vision_info(
-            messages,
-            **vision_options,
-        )
+        image_inputs = None
+        video_inputs = None
+        if request.images:
+            patch_size = getattr(
+                getattr(self._processor, "image_processor", None),
+                "patch_size",
+                None,
+            )
+            vision_options = (
+                {} if patch_size is None else {"image_patch_size": patch_size}
+            )
+            image_inputs, video_inputs = self._process_vision_info(
+                messages,
+                **vision_options,
+            )
         self._raise_if_cancelled(request)
 
         output_ids = None
         generated_ids = None
         inputs = None
         try:
-            inputs = self._processor(
-                text=[formatted],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                do_resize=False,
-                return_tensors="pt",
-            )
+            processor_options: dict[str, Any] = {
+                "text": [formatted],
+                "padding": True,
+                "return_tensors": "pt",
+            }
+            if request.images:
+                processor_options.update(
+                    images=image_inputs,
+                    videos=video_inputs,
+                    do_resize=False,
+                )
+            inputs = self._processor(**processor_options)
             inputs = inputs.to(self._input_device)
             input_length = inputs["input_ids"].shape[-1]
             generation_options: dict[str, Any] = {

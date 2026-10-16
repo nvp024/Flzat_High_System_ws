@@ -37,10 +37,11 @@ class _Processor:
         self.messages = messages
         return "formatted"
 
-    def __call__(self, *, text, images, videos, **_kwargs):
+    def __call__(self, *, text, images=None, videos=None, **_kwargs):
         assert text == ["formatted"]
-        assert videos == []
         self.images = images
+        if images is not None:
+            assert videos == []
         return _Inputs()
 
     @staticmethod
@@ -91,3 +92,32 @@ def test_qwen3_vl_uses_official_vision_preprocessing_contract() -> None:
     image_part = observed["messages"][1]["content"][0]
     assert image_part["min_pixels"] == 256 * 256
     assert image_part["max_pixels"] == 768 * 768
+
+
+def test_qwen3_vl_supports_text_only_generation() -> None:
+    processor = _Processor()
+    backend = Qwen3VlBackend(BackendConfig(model_id="fake"))
+    backend._model = _Model()
+    backend._processor = processor
+    backend._torch = _Torch()
+    backend._input_device = "cpu"
+    backend._stopping_criteria_list = list
+
+    def unexpected_vision_call(*_args, **_kwargs):
+        raise AssertionError("text-only generation called vision preprocessing")
+
+    backend._process_vision_info = unexpected_vision_call
+    response = backend.generate(
+        GenerationRequest(
+            images=(),
+            system_prompt="answer briefly",
+            user_prompt="what is the capital of China",
+            max_new_tokens=32,
+        )
+    )
+
+    assert response == '{"objects": []}'
+    assert processor.images is None
+    assert processor.messages[1]["content"] == [
+        {"type": "text", "text": "what is the capital of China"}
+    ]

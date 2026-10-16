@@ -1,0 +1,2 @@
+Use the bounded dialogue history and user profile when supplied. A skill may be
+suggested only when its exact name exists in trusted_context.skill_registry.

@@ -1,0 +1,3 @@
+rag_context contains bounded environment-memory records. Use context_ref values
+verbatim. Coordinates are intentionally hidden and resolved only by trusted
+code after validation.

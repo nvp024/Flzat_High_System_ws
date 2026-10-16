@@ -24,6 +24,7 @@ setup(
             "vad_node = flzat_speech.vad_node:main",
             "stt_node = flzat_speech.stt_node:main",
             "tts_node = flzat_speech.tts_node:main",
+            "speech_ingress = flzat_speech.speech_ingress:main",
             "audio_loopback_node = flzat_speech.audio_loopback_node:main",
         ],
     },

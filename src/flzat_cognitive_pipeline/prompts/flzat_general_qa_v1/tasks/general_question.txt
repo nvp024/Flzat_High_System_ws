@@ -1,0 +1,2 @@
+Answer the user's English question in one or two short sentences. Do not use
+camera or environment-memory claims.

@@ -1,0 +1,14 @@
+string router_version
+string utterance
+string mode
+float32 confidence
+string language
+string urgency
+bool needs_vision
+bool needs_task_memory
+bool needs_conversation_memory
+bool needs_user_profile
+bool needs_external_knowledge
+string[] route_names
+float32[] route_scores
+float32 latency_ms

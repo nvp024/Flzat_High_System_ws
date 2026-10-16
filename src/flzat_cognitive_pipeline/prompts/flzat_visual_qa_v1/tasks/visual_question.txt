@@ -1,0 +1,2 @@
+Answer the English visual question concisely. List only clearly visible object
+names and give an overall confidence from 0 to 1.

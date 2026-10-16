@@ -152,6 +152,7 @@ class TaskRecord:
     request_id: str
     original_transcript: str
     latest_transcript: str
+    mode: str = "task_command"
     state: PipelineState = PipelineState.NEW
     clarification_history: list[tuple[str, str]] = field(default_factory=list)
     pending_question: str = ""

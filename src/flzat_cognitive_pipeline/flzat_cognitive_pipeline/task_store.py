@@ -27,6 +27,7 @@ _ALLOWED: dict[PipelineState, set[PipelineState]] = {
     PipelineState.VLM_QUEUED: {PipelineState.VLM_ACTIVE, PipelineState.REJECTED},
     PipelineState.VLM_ACTIVE: {PipelineState.OUTPUT_VALIDATING},
     PipelineState.OUTPUT_VALIDATING: {
+        PipelineState.VLM_QUEUED,
         PipelineState.WAITING_CLARIFICATION,
         PipelineState.RESPONSE_ONLY,
         PipelineState.REJECTED,
@@ -86,10 +87,17 @@ class TaskRunStore:
         self._request_counts: dict[str, int] = {}
         self._waiting_task_id = ""
 
-    def accept_transcript(self, transcript: str) -> TaskRecord:
+    def accept_transcript(
+        self,
+        transcript: str,
+        mode: str = "task_command",
+    ) -> TaskRecord:
         value = transcript.strip()
         if not value:
             raise ValueError("transcript cannot be empty")
+        route_mode = mode.strip()
+        if not route_mode:
+            raise ValueError("task mode cannot be empty")
         if self._waiting_task_id:
             task = self._tasks[self._waiting_task_id]
             if len(task.clarification_history) >= self._max_clarifications:
@@ -98,6 +106,7 @@ class TaskRunStore:
             task.clarification_history.append((question, value))
             task.pending_question = ""
             task.latest_transcript = value
+            task.mode = route_mode
             request_count = self._request_counts[task.task_id] + 1
             self._request_counts[task.task_id] = request_count
             task.request_id = f"{task.task_id}-r{request_count:02d}"
@@ -114,6 +123,7 @@ class TaskRunStore:
             request_id=f"{task_id}-r01",
             original_transcript=value,
             latest_transcript=value,
+            mode=route_mode,
         )
         self._tasks[task.task_id] = task
         self.transition(task, PipelineState.CONTEXT_RETRIEVAL, "transcript accepted")

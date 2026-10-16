@@ -1,7 +1,6 @@
 cognitive_manager:
   ros__parameters:
-    enable_text_command: false
-    text_command_topic: /flzat/high_system/text_command
+    routed_command_topic: /flzat/high_system/routed_command
     command_topic: /flzat/high_system/command
     low_status_topic: /flzat/low_system/status
     low_cancel_topic: /flzat/low_system/cancel
@@ -9,11 +8,25 @@ cognitive_manager:
     rag_minimum_score: -1.0
     context_max_items: 5
     context_max_characters: 6000
+    conversation_max_turns: 5
+    conversation_max_characters: 1000
     max_clarifications: 3
+    max_repair_attempts: 2
     request_timeout_s: 60.0
     health_period_s: 2.0
     prompt_directory: ""
+    context_policy_path: ""
+    skill_registry_path: ""
+    safety_policy_path: ""
+    user_profile_path: ""
     rejection_speech: I could not safely process that request.
+
+intent_router:
+  ros__parameters:
+    enable_text_command: false
+    embedding_backend: sentence_transformer
+    embedding_device: cpu
+    embedding_local_files_only: false
 
 memory_query_node:
   ros__parameters:

@@ -1,0 +1,4 @@
+Return exact JSON with these fields and no others:
+{"reply":"...","speak":true,"suggested_skill":null}
+suggested_skill must be null or an exact trusted skill name. It is only a
+suggestion and is never automatically executed.

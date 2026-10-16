@@ -1,2 +1,0 @@
-rag_context contains bounded semantic records. Select context_ref values
-verbatim. Coordinates are intentionally hidden and resolved later by code.

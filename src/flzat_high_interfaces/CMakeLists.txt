@@ -11,6 +11,7 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MemoryObject.msg"
+  "msg/RoutedCommand.msg"
   "msg/SpeechAudio.msg"
   "srv/GetFrameNear.srv"
   "srv/QueryMemory.srv"

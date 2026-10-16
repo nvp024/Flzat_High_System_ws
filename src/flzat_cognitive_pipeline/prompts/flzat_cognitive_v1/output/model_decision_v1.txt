@@ -1,3 +1,5 @@
 Return exact JSON with these fields and no others:
 {"intent":"...","target":{"type":"...","name":"..."},"selected_context_refs":[],"execution_strategy":"direct|search|clarify|response_only","missing_information":[],"clarification_question":null,"speech":"..."}
 Do not use Markdown or code fences.
+Never include coordinates. Select only context_ref values that appear in
+RUNTIME_INPUT_JSON. Use only skills listed in trusted_context.skill_registry.

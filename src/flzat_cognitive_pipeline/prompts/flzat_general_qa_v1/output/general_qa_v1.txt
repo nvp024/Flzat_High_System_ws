@@ -1,0 +1,2 @@
+Return exact JSON with these fields and values:
+{"reply":"...","speak":true,"requires_robot_action":false}

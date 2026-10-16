@@ -15,7 +15,16 @@ def test_full_launch_can_switch_real_and_fake_boundaries():
     assert 'EqualsSubstitution(LaunchConfiguration("frame_source"), "static")' in source
     assert 'executable="static_frame_server"' in source
     assert 'executable="cognitive_manager"' in source
+    assert 'executable="intent_router"' in source
+    assert 'executable="speech_ingress"' in source
     assert 'executable="memory_query_node"' in source
+    assert 'DeclareLaunchArgument("intent_routes_path"' in source
+    assert '"config_file": LaunchConfiguration("intent_routes_path")' in source
+    assert '"context_policy_path": LaunchConfiguration("intent_routes_path")' in source
+    assert 'DeclareLaunchArgument("skill_registry_path"' in source
+    assert 'DeclareLaunchArgument("safety_policy_path"' in source
+    assert 'DeclareLaunchArgument("user_profile_path"' in source
+    assert 'DeclareLaunchArgument("max_repair_attempts"' in source
     assert "UnlessCondition" in source
     assert 'DeclareLaunchArgument(\n            "environment_id",' in source
     assert 'DeclareLaunchArgument(\n            "map_id",' in source

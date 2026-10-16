@@ -1,0 +1,2 @@
+Resolve an ambiguous request by asking one concise English question. Do not
+create an action, target, coordinate, or skill.

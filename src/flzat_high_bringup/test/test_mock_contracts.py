@@ -18,6 +18,16 @@ def test_fake_vlm_default_is_exact_json():
     assert marker in source
 
 
+def test_fake_vlm_transport_allows_text_only_requests():
+    source = (ROOT / "flzat_high_bringup/fake_servers.py").read_text(
+        encoding="utf-8"
+    )
+    goal_source = source.split("def _goal(request)", 1)[1].split(
+        "def _execute", 1
+    )[0]
+    assert "request.image.data" not in goal_source
+
+
 def test_low_status_example_is_json_serializable():
     value = {
         "schema_version": "flzat.low_status.v2",

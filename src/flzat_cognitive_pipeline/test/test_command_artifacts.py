@@ -5,6 +5,7 @@ import pytest
 from flzat_cognitive_pipeline.artifacts import (
     ArtifactConflictError,
     CommandArtifactWriter,
+    RequestArtifactWriter,
 )
 from flzat_cognitive_pipeline.command import TrustedCommandAssembler, canonical_json
 from flzat_cognitive_pipeline.domain import (
@@ -151,4 +152,55 @@ def test_duplicate_command_with_other_bytes_is_rejected(tmp_path):
     with pytest.raises(ArtifactConflictError):
         writer.write(
             "run-20261014T000000Z", "task-0001", command_id, changed
+        )
+
+
+def test_request_artifacts_are_atomic_correlated_and_immutable(tmp_path):
+    writer = RequestArtifactWriter(tmp_path)
+    value = {
+        "schema_version": "flzat.transcript.v1",
+        "task_id": "task-0001",
+        "request_id": "task-0001-r01",
+        "transcript": "get the book",
+    }
+
+    path = writer.write_json(
+        "run-20261014T000000Z",
+        "task-0001",
+        "task-0001-r01",
+        "transcript.json",
+        value,
+    )
+    repeated = writer.write_json(
+        "run-20261014T000000Z",
+        "task-0001",
+        "task-0001-r01",
+        "transcript.json",
+        value,
+    )
+
+    assert repeated == path
+    assert path.parent.name == "task-0001-r01"
+    assert json.loads(path.read_text(encoding="utf-8")) == value
+    assert not list(path.parent.glob("*.tmp"))
+
+    with pytest.raises(ArtifactConflictError):
+        writer.write_json(
+            "run-20261014T000000Z",
+            "task-0001",
+            "task-0001-r01",
+            "transcript.json",
+            {**value, "transcript": "different"},
+        )
+
+
+def test_request_artifact_rejects_path_traversal(tmp_path):
+    writer = RequestArtifactWriter(tmp_path)
+    with pytest.raises(ValueError, match="filename"):
+        writer.write_text(
+            "run-20261014T000000Z",
+            "task-0001",
+            "task-0001-r01",
+            "../secret.txt",
+            "no",
         )

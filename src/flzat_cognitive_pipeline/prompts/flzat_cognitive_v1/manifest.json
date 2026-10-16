@@ -1,7 +1,26 @@
 {
   "profile": "flzat_cognitive_v1",
-  "version": "1.2.0",
+  "version": "2.0.0",
+  "mode": "task_command",
   "model_family": "qwen3_vl",
   "output_schema": "ModelDecision.v1",
-  "maximum_context_items": 5
+  "validator": "task_command_v1",
+  "system_sections": [
+    "shared/system/identity.txt",
+    "flzat_cognitive_v1/system/identity.txt",
+    "flzat_cognitive_v1/system/capabilities.txt",
+    "shared/policies/safety.txt",
+    "flzat_cognitive_v1/policies/high_low_boundary.txt",
+    "flzat_cognitive_v1/policies/uncertainty.txt",
+    "shared/policies/json_only.txt"
+  ],
+  "user_sections": [
+    "flzat_cognitive_v1/tasks/intent_router.txt"
+  ],
+  "optional_sections": {
+    "rag_context": "shared/context/rag_context.txt",
+    "dialogue_history": "shared/context/dialogue_history.txt",
+    "trusted_context": "shared/context/trusted_context.txt"
+  },
+  "output_section": "flzat_cognitive_v1/output/model_decision_v1.txt"
 }

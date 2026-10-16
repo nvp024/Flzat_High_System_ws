@@ -14,3 +14,4 @@ pyttsx3>=2.90
 typeguard>=4.0
 chromadb==1.5.9
 sentence-transformers>=3.0,<6.0
+PyYAML>=6.0

@@ -14,12 +14,13 @@ Source đã tái sử dụng:
 Sau consolidation, code chạy chỉ nằm trong `flzat_high_system_ws`. Những bản
 thử `foundation_manager`, `multimodal_manager`, companion prompt fallback và
 standalone cloud pipeline đã bị loại bỏ. `cognitive_manager`,
-`flzat_cognitive_v1`, `high_system.launch.py` và `requirements.txt` là bốn đầu
-mối canonical.
+thư mục `prompts/` manifest-driven, `high_system.launch.py` và
+`requirements.txt` là các đầu mối canonical.
 
-`RunVlm` dùng contract tối thiểu một ảnh/một transcript; wrapper
-`MultimodalEvent` của PoC đã được loại bỏ. Prompt optional dialogue chỉ được
-ghép khi có dữ liệu. Grounding/bounding-box thử nghiệm và các backend model cũ
-đã được loại khỏi runtime canonical.
+`RunVlm` dùng một contract chung: transcript/prompt luôn bắt buộc, ảnh chỉ bắt
+buộc cho mode vision. Wrapper `MultimodalEvent` của PoC đã được loại bỏ. Prompt
+optional dialogue/RAG/trusted context chỉ được ghép khi policy của mode cho
+phép. Grounding/bounding-box thử nghiệm và các backend model cũ đã được loại
+khỏi runtime canonical.
 
 Workspace cũ không bị sửa và không phải dependency lúc chạy.

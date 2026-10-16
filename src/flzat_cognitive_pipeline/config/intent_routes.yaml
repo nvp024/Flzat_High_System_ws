@@ -1,0 +1,118 @@
+router_version: flzat_router_v1
+
+embedding:
+  model_name: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  revision: e8f8c211226b894fcb81acc59f3b34ba3efd5f42
+  device: cpu
+  local_files_only: false
+
+thresholds:
+  minimum_confidence: 0.42
+  minimum_margin: 0.035
+
+safety:
+  exact_phrases:
+    - stop
+    - halt
+    - freeze
+    - emergency stop
+    - cancel
+    - abort
+    - cancel the task
+    - cancel the mission
+    - dừng
+    - dừng lại
+    - ngừng
+    - hủy nhiệm vụ
+    - nguy hiểm
+  command_patterns:
+    - '^stop(?: now| the robot| the task| the mission)?$'
+    - '^cancel(?: the)?(?: task| mission| command)?$'
+    - '^emergency(?: stop)?$'
+    - '^dừng(?: lại| robot| nhiệm vụ)?$'
+  emergency_terms:
+    - emergency
+    - danger
+    - nguy hiểm
+
+routes:
+  task_command:
+    needs_vision: true
+    needs_task_memory: true
+    needs_conversation_memory: false
+    needs_user_profile: false
+    needs_external_knowledge: false
+    examples:
+      - get the book
+      - get the book on the table
+      - go to the bedroom
+      - go to the water cup
+      - fetch the red box
+      - bring me the bottle
+      - find the television
+      - navigate to the kitchen
+      - place the box on shelf A
+      - pick up the green book
+
+  visual_qa:
+    needs_vision: true
+    needs_task_memory: false
+    needs_conversation_memory: false
+    needs_user_profile: false
+    needs_external_knowledge: false
+    examples:
+      - what is on the table
+      - what do you see
+      - describe what you can see
+      - is the door open
+      - how many chairs are visible
+      - what color is the object in front of you
+      - can you see a book
+      - what is in this image
+
+  general_qa:
+    needs_vision: false
+    needs_task_memory: false
+    needs_conversation_memory: false
+    needs_user_profile: false
+    needs_external_knowledge: false
+    examples:
+      - what is the capital of China
+      - how many days are in a week
+      - explain gravity
+      - who wrote Hamlet
+      - what is machine learning
+      - how does photosynthesis work
+      - tell me a general fact
+
+  social_dialogue:
+    needs_vision: false
+    needs_task_memory: false
+    needs_conversation_memory: true
+    needs_user_profile: true
+    needs_external_knowledge: false
+    examples:
+      - I feel tired
+      - are you sad
+      - talk to me
+      - how are you
+      - I am feeling lonely
+      - tell me something encouraging
+      - thank you for helping me
+      - I had a difficult day
+
+  clarification:
+    needs_vision: false
+    needs_task_memory: false
+    needs_conversation_memory: true
+    needs_user_profile: false
+    needs_external_knowledge: false
+    examples:
+      - get that for me
+      - put it there
+      - bring it to me
+      - do that
+      - take this over there
+      - move the thing
+      - get the one I mean
+      - bring me that object

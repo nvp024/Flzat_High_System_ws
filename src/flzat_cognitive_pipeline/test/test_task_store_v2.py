@@ -92,3 +92,38 @@ def test_clarification_limit_is_enforced():
 
     with pytest.raises(TaskStateError, match="limit"):
         current.accept_transcript("on the table")
+
+
+def test_route_mode_is_stored_and_canonicalized_on_resume():
+    current = store()
+    task = current.accept_transcript("get that", "clarification")
+    for state in (
+        PipelineState.PROMPT_READY,
+        PipelineState.VLM_QUEUED,
+        PipelineState.VLM_ACTIVE,
+        PipelineState.OUTPUT_VALIDATING,
+    ):
+        current.transition(task, state, "test")
+    current.wait_for_clarification(task, "Which object?")
+
+    resumed = current.accept_transcript("the book", "task_command")
+
+    assert resumed.mode == "task_command"
+    assert resumed.task_id == task.task_id
+
+
+def test_output_validation_can_queue_bounded_format_repair():
+    current = store()
+    task = current.accept_transcript("get the book")
+    for state in (
+        PipelineState.PROMPT_READY,
+        PipelineState.VLM_QUEUED,
+        PipelineState.VLM_ACTIVE,
+        PipelineState.OUTPUT_VALIDATING,
+    ):
+        current.transition(task, state, "test")
+
+    current.transition(task, PipelineState.VLM_QUEUED, "repair")
+    current.transition(task, PipelineState.VLM_ACTIVE, "repair accepted")
+
+    assert task.state == PipelineState.VLM_ACTIVE

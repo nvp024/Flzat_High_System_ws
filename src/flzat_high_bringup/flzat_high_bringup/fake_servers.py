@@ -80,7 +80,6 @@ class FakeVlmServer(Node):
     def _goal(request) -> GoalResponse:
         if (
             not request.transcript.strip()
-            or not request.image.data
             or not request.system_prompt.strip()
             or not request.user_prompt.strip()
         ):

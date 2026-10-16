@@ -3,7 +3,8 @@
 Unified ROS 2 workspace for the High-Level Cognitive Pipeline:
 
 ```text
-Voice → VAD → English STT → Cognitive Manager
+Voice → VAD → English STT → Safety Guard → Intent Router
+→ Cognitive Manager
 → read-only RAG → modular prompt → Qwen3-VL
 → validate/normalize JSON → clarification or High-Level Command
 → JSON artifact + ROS 2 topic → Low System
@@ -18,13 +19,43 @@ kept only as references and are not runtime dependencies.
 - `flzat_vision_context`: camera buffering and `/vision/get_frame_near`.
 - `flzat_memory`: read-only access to an existing Chroma database through
   `QueryMemory`.
-- `flzat_cognitive_pipeline`: manager, RAG context, prompt composition,
-  validation, and command generation.
+- `flzat_cognitive_pipeline`: safety guard, semantic intent router, manager,
+  RAG context, prompt composition, validation, and command generation.
 - `flzat_vlm`: Qwen3-VL server for cognitive inference.
 - `flzat_high_bringup`: the production launch file and test adapters/mocks.
 
-There is one production manager, `cognitive_manager`, and one canonical prompt
-profile for cognitive commands, `flzat_cognitive_v1/manifest.json`.
+There is one production manager, `cognitive_manager`, and five manifest-driven
+prompt profiles. `flzat_cognitive_v1` remains the task-command profile;
+visual QA, general QA, social dialogue, and clarification each have their own
+profile and strict output schema.
+
+The routing boundary classifies `task_command`, `visual_qa`, `general_qa`,
+`social_dialogue`, and `clarification` with cached semantic embeddings. Safety
+commands bypass semantic inference and publish a high-level cancel request.
+
+The Phase 2 adaptive-context boundary is also active:
+
+- `task_command` uses the camera, environment RAG, trusted skill registry, and
+  safety policy;
+- `visual_qa` uses the camera without environment RAG;
+- `general_qa` is text-only;
+- `social_dialogue` uses bounded conversation history and a read-only user
+  profile;
+- `clarification` uses bounded dialogue/task history.
+
+`ContextPolicy` reloads the trusted mode rules from YAML and canonicalizes the
+flags supplied by the router. Only `task_command` can reach the trusted command
+assembler and publish `/flzat/high_system/command`.
+
+The Phase 3 output boundary is active:
+
+- `PromptComposer` selects and validates the manifest for the routed mode;
+- mode-specific validators reject cross-mode JSON, unknown skills, and
+  model-generated coordinates;
+- an invalid model response may be repaired at most twice using the same
+  Qwen backend, frozen frame, and context snapshot;
+- each request stores transcript/router/context/prompt/VLM/validator artifacts
+  under `<output_root>/<run_id>/<task_id>/<request_id>/`.
 
 ## Install dependencies and build
 
@@ -38,6 +69,10 @@ python -m pip check
 colcon build --symlink-install
 source install/setup.bash
 ```
+
+Run `colcon` after activating `py312`. The generated ROS Python executables
+must point to the Conda interpreter so they can import `chromadb`, PyTorch, and
+the pinned model dependencies.
 
 Full voice mode uses these runtime model files stored directly in this
 workspace; `models/` is a real directory and does not link to an older

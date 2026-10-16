@@ -130,9 +130,6 @@ class VlmNode(Node):
         self.declare_parameter("qwen_max_image_pixels", 768 * 768)
 
     def _on_run_goal(self, goal_request: RunVlm.Goal) -> GoalResponse:
-        if not goal_request.image.data:
-            self.get_logger().warn("Rejected VLM goal with empty image data.")
-            return GoalResponse.REJECT
         if not goal_request.transcript.strip():
             self.get_logger().warn("Rejected VLM goal without a transcript.")
             return GoalResponse.REJECT
@@ -182,10 +179,13 @@ class VlmNode(Node):
             request = goal_handle.request
             system_prompt = request.system_prompt
             user_prompt = request.user_prompt
-            self._publish_run_feedback(goal_handle, "decoding_image")
-            images = decode_compressed_images(
-                [request.image], self._max_input_bytes, self._max_image_pixels
-            )
+            if request.image.data:
+                self._publish_run_feedback(goal_handle, "decoding_image")
+                images = decode_compressed_images(
+                    [request.image], self._max_input_bytes, self._max_image_pixels
+                )
+            else:
+                self._publish_run_feedback(goal_handle, "text_only")
             self._raise_if_cancelled(goal_handle, ticket)
             self._publish_run_feedback(goal_handle, "inference")
             inference_started = time.perf_counter()

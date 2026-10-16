@@ -1,0 +1,22 @@
+{
+  "profile": "flzat_social_v1",
+  "version": "1.0.0",
+  "mode": "social_dialogue",
+  "model_family": "qwen3_vl",
+  "output_schema": "SocialDialogue.v1",
+  "validator": "social_dialogue_v1",
+  "system_sections": [
+    "shared/system/identity.txt",
+    "flzat_social_v1/system/identity.txt",
+    "shared/policies/safety.txt",
+    "shared/policies/json_only.txt"
+  ],
+  "user_sections": [
+    "flzat_social_v1/tasks/social_reply.txt"
+  ],
+  "optional_sections": {
+    "dialogue_history": "shared/context/dialogue_history.txt",
+    "trusted_context": "shared/context/trusted_context.txt"
+  },
+  "output_section": "flzat_social_v1/output/social_dialogue_v1.txt"
+}

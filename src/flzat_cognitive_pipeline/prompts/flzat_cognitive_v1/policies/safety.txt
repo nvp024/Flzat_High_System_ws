@@ -1,2 +1,0 @@
-Do not invent coordinates, object identities, room locations or capabilities.
-If information needed to choose the target is missing, ask one concise question.

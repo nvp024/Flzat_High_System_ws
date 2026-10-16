@@ -22,6 +22,10 @@ def generate_launch_description():
         get_package_share_directory("flzat_high_bringup")
         + "/config/high_system.yaml"
     )
+    intent_routes = (
+        get_package_share_directory("flzat_cognitive_pipeline")
+        + "/config/intent_routes.yaml"
+    )
     vision = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             get_package_share_directory("flzat_vision_context"),
@@ -81,7 +85,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("static_image_path", default_value=""),
         DeclareLaunchArgument("request_timeout_s", default_value="60.0"),
+        DeclareLaunchArgument("max_repair_attempts", default_value="2"),
         DeclareLaunchArgument("health_period_s", default_value="2.0"),
+        DeclareLaunchArgument("intent_routes_path", default_value=intent_routes),
+        DeclareLaunchArgument("skill_registry_path", default_value=""),
+        DeclareLaunchArgument("safety_policy_path", default_value=""),
+        DeclareLaunchArgument("user_profile_path", default_value=""),
         DeclareLaunchArgument("vlm_backend", default_value="qwen3_vl"),
         DeclareLaunchArgument("model_id", default_value="Qwen/Qwen3-VL-2B-Instruct"),
         DeclareLaunchArgument("model_revision", default_value="main"),
@@ -170,6 +179,29 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_fake_speech")),
         ),
+        Node(
+            package="flzat_speech",
+            executable="speech_ingress",
+            name="speech_ingress",
+            output="screen",
+        ),
+        Node(
+            package="flzat_cognitive_pipeline",
+            executable="intent_router",
+            name="intent_router",
+            output="screen",
+            parameters=[config, {
+                "config_file": LaunchConfiguration("intent_routes_path"),
+                "embedding_backend": LaunchConfiguration("embedding_backend"),
+                "embedding_device": "cpu",
+                "embedding_local_files_only": ParameterValue(
+                    LaunchConfiguration("embedding_local_files_only"), value_type=bool
+                ),
+                "enable_text_command": ParameterValue(
+                    LaunchConfiguration("enable_text_command"), value_type=bool
+                ),
+            }],
+        ),
         real_vlm,
         Node(
             package="flzat_high_bringup",
@@ -201,11 +233,15 @@ def generate_launch_description():
                 "environment_id": LaunchConfiguration("environment_id"),
                 "map_id": LaunchConfiguration("map_id"),
                 "output_root": LaunchConfiguration("output_root"),
-                "enable_text_command": ParameterValue(
-                    LaunchConfiguration("enable_text_command"), value_type=bool
-                ),
+                "context_policy_path": LaunchConfiguration("intent_routes_path"),
+                "skill_registry_path": LaunchConfiguration("skill_registry_path"),
+                "safety_policy_path": LaunchConfiguration("safety_policy_path"),
+                "user_profile_path": LaunchConfiguration("user_profile_path"),
                 "request_timeout_s": ParameterValue(
                     LaunchConfiguration("request_timeout_s"), value_type=float
+                ),
+                "max_repair_attempts": ParameterValue(
+                    LaunchConfiguration("max_repair_attempts"), value_type=int
                 ),
                 "health_period_s": ParameterValue(
                     LaunchConfiguration("health_period_s"), value_type=float

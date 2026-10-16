@@ -1,0 +1,2 @@
+Answer the user's question using only the current image. If the image is
+unclear, say so instead of guessing.

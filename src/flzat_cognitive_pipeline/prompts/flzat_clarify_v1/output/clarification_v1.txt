@@ -1,0 +1,3 @@
+Return exact JSON with this field and no others:
+{"reply":"Which object do you mean?"}
+reply must be one concise question ending with a question mark.

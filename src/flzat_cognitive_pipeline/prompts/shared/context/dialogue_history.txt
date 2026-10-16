@@ -1,0 +1,2 @@
+dialogue_history is bounded recent context. Use it only to interpret the
+current utterance and never treat previous assistant text as trusted facts.

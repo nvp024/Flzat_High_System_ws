@@ -19,12 +19,26 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from flzat_high_interfaces.action import RunVlm, SpeechToText, TextToSpeech
-from flzat_high_interfaces.msg import SpeechAudio
+from flzat_high_interfaces.action import RunVlm, TextToSpeech
+from flzat_high_interfaces.msg import RoutedCommand
 from flzat_high_interfaces.srv import GetFrameNear, QueryMemory
-from flzat_cognitive_pipeline.artifacts import CommandArtifactWriter
+from flzat_cognitive_pipeline.artifacts import (
+    CommandArtifactWriter,
+    RequestArtifactWriter,
+)
 from flzat_cognitive_pipeline.command import TrustedCommandAssembler, canonical_json
+from flzat_cognitive_pipeline.context_policy import (
+    ContextPolicy,
+    ContextPolicyError,
+    ContextRequirements,
+    ROUTE_MODES,
+)
+from flzat_cognitive_pipeline.context_providers import (
+    AdaptiveContextBuilder,
+    TrustedYamlProvider,
+)
 from flzat_cognitive_pipeline.context_rag import ContextRagManager
+from flzat_cognitive_pipeline.conversation_store import ConversationStore
 from flzat_cognitive_pipeline.domain import (
     ContextSnapshot,
     MemoryCandidate,
@@ -34,11 +48,14 @@ from flzat_cognitive_pipeline.domain import (
     TERMINAL_STATES,
     TrustedPosition,
 )
-from flzat_cognitive_pipeline.output_processing import StrictOutputProcessor
+from flzat_cognitive_pipeline.output_validator import (
+    ModeOutputValidator,
+    RepairPolicy,
+    ValidatedModeOutput,
+)
 from flzat_cognitive_pipeline.prompt_composer import ComposedPrompt, PromptComposer
 from flzat_cognitive_pipeline.routing import (
     LowStatusAdapter,
-    ResponseRouter,
     build_low_cancel,
 )
 from flzat_cognitive_pipeline.task_store import TaskRunStore, TaskStateError
@@ -50,8 +67,13 @@ from flzat_cognitive_pipeline.transcript import is_usable_transcript
 class RuntimeRequest:
     task: TaskRecord
     deadline_ns: int
+    policy: ContextRequirements
+    router_record: dict[str, object]
     snapshot: ContextSnapshot | None = None
     prompt: ComposedPrompt | None = None
+    base_prompt: ComposedPrompt | None = None
+    frame: CompressedImage | None = None
+    attempts_sent: int = 0
     vlm_goal_handle: object | None = None
 
 
@@ -78,7 +100,7 @@ class CognitiveManagerNode(Node):
             raise ValueError("request_timeout_s must be positive")
         if float(self.get_parameter("health_period_s").value) <= 0.0:
             raise ValueError("health_period_s must be positive")
-        self._text_enabled = bool(self.get_parameter("enable_text_command").value)
+        self._routed_topic = self._text_parameter("routed_command_topic")
 
         self._tasks = TaskRunStore(
             max_clarifications=int(self.get_parameter("max_clarifications").value)
@@ -91,12 +113,47 @@ class CognitiveManagerNode(Node):
             minimum_score=float(self.get_parameter("rag_minimum_score").value),
         )
         self._prompts = PromptComposer(self._text_parameter("prompt_directory"))
-        self._processor = StrictOutputProcessor()
-        self._assembler = TrustedCommandAssembler()
-        self._writer = CommandArtifactWriter(
-            Path(self._text_parameter("output_root"))
+        self._context_policy = ContextPolicy.from_yaml(
+            self._trusted_config_path("context_policy_path", "intent_routes.yaml")
         )
-        self._router = ResponseRouter(self._text_parameter("rejection_speech"))
+        self._conversation = ConversationStore(
+            max_turns=int(self.get_parameter("conversation_max_turns").value),
+            max_text_characters=int(
+                self.get_parameter("conversation_max_characters").value
+            ),
+        )
+        skill_registry = TrustedYamlProvider(
+            self._trusted_config_path("skill_registry_path", "skill_registry.yaml"),
+            "skills",
+        )
+        safety_policy = TrustedYamlProvider(
+            self._trusted_config_path("safety_policy_path", "safety_policy.yaml"),
+            "safety_policy",
+        )
+        user_profile = TrustedYamlProvider(
+            self._trusted_config_path("user_profile_path", "user_profile.yaml"),
+            "user_profile",
+        )
+        self._adaptive_context = AdaptiveContextBuilder(
+            skill_registry=skill_registry,
+            safety_policy=safety_policy,
+            user_profile=user_profile,
+            conversation_store=self._conversation,
+        )
+        skills = skill_registry.get()
+        allowed_skills = [
+            item.get("name", "")
+            for item in skills
+            if isinstance(item, dict)
+        ]
+        self._validator = ModeOutputValidator(allowed_skills)
+        self._repair_policy = RepairPolicy(
+            int(self.get_parameter("max_repair_attempts").value)
+        )
+        self._assembler = TrustedCommandAssembler()
+        output_root = Path(self._text_parameter("output_root"))
+        self._writer = CommandArtifactWriter(output_root)
+        self._request_writer = RequestArtifactWriter(output_root)
         self._low_status = LowStatusAdapter()
         self._telemetry = PipelineTelemetry(self._tasks.run_id)
         self._started_ns = time.monotonic_ns()
@@ -131,22 +188,13 @@ class CognitiveManagerNode(Node):
         self._low_cancel_pub = self.create_publisher(
             String, self._text_parameter("low_cancel_topic"), qos
         )
-        self._audio_sub = self.create_subscription(
-            SpeechAudio,
-            "/audio_events",
-            self._on_audio,
+        self._routed_sub = self.create_subscription(
+            RoutedCommand,
+            self._routed_topic,
+            self._on_routed_command,
             qos,
             callback_group=self._cb_group,
         )
-        self._text_sub = None
-        if self._text_enabled:
-            self._text_sub = self.create_subscription(
-                String,
-                self._text_parameter("text_command_topic"),
-                self._on_text,
-                qos,
-                callback_group=self._cb_group,
-            )
         self._cancel_sub = self.create_subscription(
             String,
             "/flzat/high_system/cancel",
@@ -160,9 +208,6 @@ class CognitiveManagerNode(Node):
             self._on_low_status,
             qos,
             callback_group=self._cb_group,
-        )
-        self._stt_client = ActionClient(
-            self, SpeechToText, "/stt_action", callback_group=self._cb_group
         )
         self._vlm_client = ActionClient(
             self, RunVlm, "/vlm/run", callback_group=self._cb_group
@@ -192,8 +237,9 @@ class CognitiveManagerNode(Node):
         )
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter("enable_text_command", False)
-        self.declare_parameter("text_command_topic", "/flzat/high_system/text_command")
+        self.declare_parameter(
+            "routed_command_topic", "/flzat/high_system/routed_command"
+        )
         self.declare_parameter("command_topic", "/flzat/high_system/command")
         self.declare_parameter("low_status_topic", "/flzat/low_system/status")
         self.declare_parameter("low_cancel_topic", "/flzat/low_system/cancel")
@@ -203,10 +249,17 @@ class CognitiveManagerNode(Node):
         self.declare_parameter("rag_minimum_score", -1.0)
         self.declare_parameter("context_max_items", 5)
         self.declare_parameter("context_max_characters", 6000)
+        self.declare_parameter("conversation_max_turns", 5)
+        self.declare_parameter("conversation_max_characters", 1000)
         self.declare_parameter("max_clarifications", 3)
+        self.declare_parameter("max_repair_attempts", 2)
         self.declare_parameter("request_timeout_s", 60.0)
         self.declare_parameter("health_period_s", 2.0)
         self.declare_parameter("prompt_directory", "")
+        self.declare_parameter("context_policy_path", "")
+        self.declare_parameter("skill_registry_path", "")
+        self.declare_parameter("safety_policy_path", "")
+        self.declare_parameter("user_profile_path", "")
         self.declare_parameter(
             "output_root", "~/.local/share/flzat/high_system/commands"
         )
@@ -214,68 +267,111 @@ class CognitiveManagerNode(Node):
             "rejection_speech", "I could not safely process that request."
         )
 
-    def _on_text(self, message: String) -> None:
-        transcript = message.data.strip()
+    def _on_routed_command(self, message: RoutedCommand) -> None:
+        transcript = message.utterance.strip()
         if not is_usable_transcript(transcript):
-            self.get_logger().warn("Ignored invalid text command.")
+            self.get_logger().warn("Ignored routed command without a usable utterance.")
             return
-        self._accept_transcript(transcript, "development_text_command")
-
-    def _on_audio(self, message: SpeechAudio) -> None:
-        if not message.audio_data or message.sample_rate != 16_000:
-            self.get_logger().warn("Ignored audio that is empty or not 16 kHz.")
+        if (
+            len(message.route_names) != len(message.route_scores)
+            or not math.isfinite(float(message.confidence))
+            or not math.isfinite(float(message.latency_ms))
+        ):
+            self.get_logger().warn("Ignored malformed routed command metadata.")
+            return
+        if message.mode == "safety_stop":
+            # The router also publishes the canonical high-level cancel event.
             return
         with self._lock:
-            if self._active is not None:
-                self.get_logger().warn("Ignored audio while a request is active.")
-                return
-        if not self._stt_client.server_is_ready():
-            self.get_logger().error("STT action server is unavailable.")
+            waiting_id = self._tasks.waiting_task_id
+            waiting = self._tasks.get(waiting_id) if waiting_id else None
+        continuation_mode = ""
+        if waiting is not None:
+            continuation_mode = (
+                "task_command" if waiting.mode == "clarification" else waiting.mode
+            )
+        proposed_flags = {
+            "needs_vision": bool(message.needs_vision),
+            "needs_task_memory": bool(message.needs_task_memory),
+            "needs_conversation_memory": bool(message.needs_conversation_memory),
+            "needs_user_profile": bool(message.needs_user_profile),
+            "needs_external_knowledge": bool(message.needs_external_knowledge),
+        }
+        try:
+            policy = self._context_policy.resolve(
+                message.mode,
+                proposed_flags,
+                continuation_mode=continuation_mode,
+            )
+        except ContextPolicyError as exc:
+            self.get_logger().warn(f"Routed command rejected by context policy: {exc}")
             return
-        goal = SpeechToText.Goal()
-        goal.audio_packet = message
-        future = self._stt_client.send_goal_async(goal)
-        future.add_done_callback(self._on_stt_goal)
+        if policy.corrected_flags:
+            self.get_logger().warn(
+                "ContextPolicy corrected untrusted router flags: "
+                + ", ".join(policy.corrected_flags)
+            )
+        self._accept_transcript(
+            transcript,
+            f"intent_router:{message.mode}",
+            policy,
+            {
+                "schema_version": "flzat.router_record.v1",
+                "router_version": message.router_version,
+                "routed_mode": message.mode,
+                "effective_mode": policy.mode,
+                "confidence": float(message.confidence),
+                "language": message.language,
+                "urgency": message.urgency,
+                "route_scores": {
+                    name: float(score)
+                    for name, score in zip(
+                        message.route_names,
+                        message.route_scores,
+                    )
+                },
+                "latency_ms": float(message.latency_ms),
+            },
+        )
 
-    def _on_stt_goal(self, future) -> None:
-        try:
-            handle = future.result()
-            if not handle.accepted:
-                self.get_logger().warn("STT goal was rejected.")
-                return
-            result_future = handle.get_result_async()
-            result_future.add_done_callback(self._on_stt_result)
-        except Exception as exc:
-            self.get_logger().error(f"STT dispatch failed: {exc}")
-
-    def _on_stt_result(self, future) -> None:
-        try:
-            transcript = future.result().result.transcript.strip()
-            if not is_usable_transcript(transcript):
-                self.get_logger().warn("STT returned no usable English transcript.")
-                return
-            self._accept_transcript(transcript, "speech_audio")
-        except Exception as exc:
-            self.get_logger().error(f"STT result failed: {exc}")
-
-    def _accept_transcript(self, transcript: str, source: str) -> None:
+    def _accept_transcript(
+        self,
+        transcript: str,
+        source: str,
+        policy: ContextRequirements,
+        router_record: dict[str, object],
+    ) -> None:
         with self._lock:
             if self._active is not None:
                 self.get_logger().warn("Ignored transcript while a request is active.")
                 return
             try:
-                task = self._tasks.accept_transcript(transcript)
+                task = self._tasks.accept_transcript(transcript, policy.mode)
             except (ValueError, TaskStateError) as exc:
                 self.get_logger().warn(f"Transcript rejected: {exc}")
                 return
             runtime = RuntimeRequest(
                 task=task,
                 deadline_ns=time.monotonic_ns() + self._request_timeout_ns,
+                policy=policy,
+                router_record=router_record,
             )
             self._telemetry.begin(task.request_id, task.task_id, source)
             self._active = runtime
+        try:
+            self._write_initial_artifacts(runtime)
+            self._telemetry.mark(task.request_id, "request_artifacts")
+        except Exception as exc:
+            self._reject(runtime, f"request artifact write failed: {exc}")
+            return
+        with self._lock:
+            if not self._is_current(runtime):
+                return
             self._publish_status(task, source)
-        self._query_memory(runtime)
+        if policy.needs_task_memory:
+            self._query_memory(runtime)
+        else:
+            self._prepare_prompt(runtime, self._empty_snapshot(task.request_id))
 
     def _query_memory(self, runtime: RuntimeRequest) -> None:
         if not self._memory_client.service_is_ready():
@@ -312,33 +408,78 @@ class CognitiveManagerNode(Node):
                 self._map_id,
                 candidates,
             )
+            self._prepare_prompt(runtime, snapshot)
+        except Exception as exc:
+            self._reject(runtime, f"context/prompt processing failed: {exc}")
+
+    def _prepare_prompt(
+        self,
+        runtime: RuntimeRequest,
+        snapshot: ContextSnapshot,
+    ) -> None:
+        try:
+            adaptive = self._adaptive_context.build(
+                runtime.policy,
+                runtime.task,
+                snapshot,
+            )
             runtime.snapshot = snapshot
-            dialogue = [
-                {"question": question, "answer": answer}
-                for question, answer in runtime.task.clarification_history
-            ]
+            self._telemetry.mark(
+                runtime.task.request_id,
+                "rag_context" if runtime.policy.needs_task_memory else "context_build",
+            )
             runtime.prompt = self._prompts.compose(
                 transcript=runtime.task.original_transcript,
-                context_items=[item.prompt_value() for item in snapshot.items],
-                context_refs=snapshot.refs,
-                dialogue_history=dialogue,
+                context_items=adaptive.context_items,
+                context_refs=adaptive.context_refs,
+                dialogue_history=adaptive.dialogue_history,
+                mode=adaptive.mode,
+                trusted_context=adaptive.trusted_context,
+                include_rag_context=adaptive.include_rag_context,
             )
-            self._telemetry.mark(request_id, "rag_and_prompt")
+            runtime.base_prompt = runtime.prompt
+            self._telemetry.mark(runtime.task.request_id, "prompt_composition")
+            self._request_writer.write_json(
+                runtime.task.run_id,
+                runtime.task.task_id,
+                runtime.task.request_id,
+                "rag_context.json",
+                {
+                    "schema_version": "flzat.rag_context.v1",
+                    "enabled": adaptive.include_rag_context,
+                    "environment_id": snapshot.environment_id,
+                    "map_id": snapshot.map_id,
+                    "context_refs": list(adaptive.context_refs),
+                    "items": adaptive.context_items,
+                    "truncated": snapshot.truncated,
+                },
+            )
+            self._write_prompt_metadata(runtime, runtime.prompt, 1)
+            self._telemetry.mark(runtime.task.request_id, "prompt_artifacts")
             with self._lock:
                 if not self._is_current(runtime):
                     return
                 self._tasks.transition(
-                    runtime.task, PipelineState.PROMPT_READY, "RAG context frozen"
+                    runtime.task,
+                    PipelineState.PROMPT_READY,
+                    f"{runtime.policy.mode} context frozen",
                 )
                 self._tasks.transition(
                     runtime.task, PipelineState.VLM_QUEUED, "prompt composed"
                 )
                 self._publish_status(runtime.task, "prompt_ready")
-            self._obtain_frame(runtime)
+            if runtime.policy.needs_vision:
+                self._obtain_frame(runtime)
+            else:
+                self._telemetry.mark(runtime.task.request_id, "frame_skipped")
+                self._send_vlm(runtime, CompressedImage())
         except Exception as exc:
             self._reject(runtime, f"context/prompt processing failed: {exc}")
 
     def _obtain_frame(self, runtime: RuntimeRequest) -> None:
+        if not runtime.policy.needs_vision:
+            self._reject(runtime, "ContextPolicy forbids frame lookup for this mode")
+            return
         stamp = self.get_clock().now().to_msg()
         if not self._frame_client.service_is_ready():
             self._reject(runtime, "frame service is unavailable")
@@ -374,9 +515,23 @@ class CognitiveManagerNode(Node):
         if prompt is None:
             self._reject(runtime, "composed prompt is missing")
             return
-        self._telemetry.mark(runtime.task.request_id, "frame_lookup")
+        if runtime.policy.needs_vision and not frame.data:
+            self._reject(runtime, "vision mode cannot invoke VLM without a frame")
+            return
+        if not runtime.policy.needs_vision and frame.data:
+            self._reject(runtime, "text-only mode received an unexpected frame")
+            return
+        if runtime.attempts_sent == 0:
+            runtime.frame = frame
+        if runtime.frame is None:
+            self._reject(runtime, "frozen VLM frame is missing")
+            return
+        if runtime.policy.needs_vision and runtime.attempts_sent == 0:
+            self._telemetry.mark(runtime.task.request_id, "frame_lookup")
+        runtime.attempts_sent += 1
+        attempt = runtime.attempts_sent
         goal = RunVlm.Goal()
-        goal.image = frame
+        goal.image = runtime.frame
         goal.transcript = runtime.task.latest_transcript
         goal.request_id = runtime.task.request_id
         goal.system_prompt = prompt.system_prompt
@@ -386,13 +541,22 @@ class CognitiveManagerNode(Node):
         future = self._vlm_client.send_goal_async(goal)
         future.add_done_callback(
             lambda completed: self._on_vlm_goal(
-                runtime.task.task_id, runtime.task.request_id, completed
+                runtime.task.task_id,
+                runtime.task.request_id,
+                attempt,
+                completed,
             )
         )
 
-    def _on_vlm_goal(self, task_id: str, request_id: str, future) -> None:
+    def _on_vlm_goal(
+        self,
+        task_id: str,
+        request_id: str,
+        attempt: int,
+        future,
+    ) -> None:
         runtime = self._current(task_id, request_id)
-        if runtime is None:
+        if runtime is None or runtime.attempts_sent != attempt:
             return
         try:
             handle = future.result()
@@ -404,21 +568,32 @@ class CognitiveManagerNode(Node):
                     handle.cancel_goal_async()
                     return
                 runtime.vlm_goal_handle = handle
-                self._telemetry.mark(request_id, "vlm_queue")
+                self._telemetry.mark(request_id, f"vlm_queue_{attempt:02d}")
                 self._tasks.transition(
                     runtime.task, PipelineState.VLM_ACTIVE, "VLM goal accepted"
                 )
                 self._publish_status(runtime.task, "vlm_active")
             result_future = handle.get_result_async()
             result_future.add_done_callback(
-                lambda completed: self._on_vlm_result(task_id, request_id, completed)
+                lambda completed: self._on_vlm_result(
+                    task_id,
+                    request_id,
+                    attempt,
+                    completed,
+                )
             )
         except Exception as exc:
             self._reject(runtime, f"VLM dispatch failed: {exc}")
 
-    def _on_vlm_result(self, task_id: str, request_id: str, future) -> None:
+    def _on_vlm_result(
+        self,
+        task_id: str,
+        request_id: str,
+        attempt: int,
+        future,
+    ) -> None:
         runtime = self._current(task_id, request_id)
-        if runtime is None:
+        if runtime is None or runtime.attempts_sent != attempt:
             return
         try:
             result = future.result().result
@@ -431,49 +606,162 @@ class CognitiveManagerNode(Node):
             if runtime.snapshot is None:
                 self._reject(runtime, "trusted context snapshot is missing")
                 return
-            self._telemetry.mark(request_id, "vlm_inference")
+            self._request_writer.write_text(
+                runtime.task.run_id,
+                runtime.task.task_id,
+                request_id,
+                f"vlm_attempt_{attempt:02d}.txt",
+                result.response_text,
+            )
+            self._telemetry.mark(request_id, f"vlm_inference_{attempt:02d}")
             with self._lock:
                 self._tasks.transition(
                     runtime.task,
                     PipelineState.OUTPUT_VALIDATING,
                     "VLM response received",
                 )
-            outcome = self._processor.process(
+            validated = self._validator.validate(
+                runtime.policy.mode,
                 result.response_text,
                 runtime.snapshot,
                 expected_request_id=request_id,
             )
-            self._telemetry.mark(request_id, "output_validation")
-            self._handle_outcome(runtime, outcome)
+            self._request_writer.write_json(
+                runtime.task.run_id,
+                runtime.task.task_id,
+                request_id,
+                f"validator_attempt_{attempt:02d}.json",
+                validated.validation_record(attempt),
+            )
+            self._telemetry.mark(request_id, f"validator_{attempt:02d}")
+            if not validated.valid:
+                self._attempt_repair(runtime, result.response_text, validated.error)
+                return
+            self._request_writer.write_json(
+                runtime.task.run_id,
+                runtime.task.task_id,
+                request_id,
+                "validated_output.json",
+                {
+                    "schema_version": "flzat.validated_output.v1",
+                    "mode": validated.mode,
+                    "output": validated.value,
+                },
+            )
+            self._telemetry.mark(request_id, "validated_artifact")
+            self._handle_validated(runtime, validated)
         except Exception as exc:
             self._reject(runtime, f"VLM result processing failed: {exc}")
 
-    def _handle_outcome(self, runtime: RuntimeRequest, outcome) -> None:
-        route = self._router.route(outcome)
-        task = runtime.task
-        if outcome.kind == OutcomeKind.NEEDS_CLARIFICATION:
+    def _attempt_repair(
+        self,
+        runtime: RuntimeRequest,
+        raw_response: str,
+        validation_error: str,
+    ) -> None:
+        repair_number = self._repair_policy.next_repair_number(
+            runtime.attempts_sent
+        )
+        if repair_number is None:
+            self._request_writer.write_json(
+                runtime.task.run_id,
+                runtime.task.task_id,
+                runtime.task.request_id,
+                "failure.json",
+                {
+                    "schema_version": "flzat.request_failure.v1",
+                    "reason": "output validation failed after repair limit",
+                    "validation_error": validation_error,
+                    "attempts": runtime.attempts_sent,
+                },
+            )
+            self._reject(
+                runtime,
+                "output validation failed after repair limit: " + validation_error,
+            )
+            self._speak(self._text_parameter("rejection_speech"))
+            return
+        if time.monotonic_ns() >= runtime.deadline_ns:
+            self._time_out(runtime, "request deadline before output repair")
+            return
+        base_prompt = runtime.base_prompt
+        if base_prompt is None or runtime.frame is None:
+            self._reject(runtime, "repair cannot reuse the frozen request")
+            return
+        try:
+            repair_prompt = self._prompts.compose_repair(
+                base_prompt,
+                raw_response=raw_response,
+                validation_error=validation_error,
+                repair_number=repair_number,
+            )
+            runtime.prompt = repair_prompt
+            self._write_prompt_metadata(
+                runtime,
+                repair_prompt,
+                runtime.attempts_sent + 1,
+            )
+            self._telemetry.mark(
+                runtime.task.request_id,
+                f"repair_prompt_{repair_number:02d}",
+            )
             with self._lock:
-                self._tasks.wait_for_clarification(task, route.speech)
+                if not self._is_current(runtime):
+                    return
+                self._tasks.transition(
+                    runtime.task,
+                    PipelineState.VLM_QUEUED,
+                    f"output repair {repair_number} queued",
+                )
+                self._publish_status(runtime.task, f"repair_{repair_number}_queued")
+            self._send_vlm(runtime, runtime.frame)
+        except Exception as exc:
+            self._reject(runtime, f"output repair failed: {exc}")
+
+    def _handle_validated(
+        self,
+        runtime: RuntimeRequest,
+        validated: ValidatedModeOutput,
+    ) -> None:
+        task = runtime.task
+        if validated.kind == OutcomeKind.NEEDS_CLARIFICATION:
+            with self._lock:
+                self._tasks.wait_for_clarification(task, validated.reply)
                 self._active = None
                 self._publish_status(task, "clarification_required")
                 self._finish_metrics(task.request_id, "clarification")
-            self._speak(route.speech)
+            self._remember_turn(runtime, validated.reply)
+            self._speak(validated.reply)
             return
-        if outcome.kind == OutcomeKind.RESPONSE_ONLY:
+        if validated.kind == OutcomeKind.RESPONSE_ONLY:
             with self._lock:
                 self._tasks.transition(task, PipelineState.RESPONSE_ONLY, "response only")
                 self._active = None
                 self._publish_status(task, "response_only")
                 self._finish_metrics(task.request_id, "response_only")
-            self._speak(route.speech)
+            self._remember_turn(runtime, validated.reply)
+            self._speak(validated.reply)
             return
-        if outcome.kind == OutcomeKind.REJECTED:
-            self._reject(runtime, outcome.error or "model decision rejected")
-            self._speak(route.speech)
+        if not runtime.policy.allows_low_command:
+            self._reject(
+                runtime,
+                f"route mode '{runtime.policy.mode}' cannot publish a High Command",
+            )
+            self._speak(self._text_parameter("rejection_speech"))
             return
-        self._publish_command(runtime, outcome, route.speech)
+        if validated.task_outcome is None:
+            self._reject(runtime, "task validator did not return a task outcome")
+            return
+        self._publish_command(
+            runtime,
+            validated.task_outcome,
+            validated.reply,
+        )
 
     def _publish_command(self, runtime: RuntimeRequest, outcome, success_speech: str) -> None:
+        if not runtime.policy.allows_low_command:
+            self._reject(runtime, "ContextPolicy blocked a non-task Low command")
+            return
         task = runtime.task
         snapshot = runtime.snapshot
         if snapshot is None:
@@ -587,11 +875,15 @@ class CognitiveManagerNode(Node):
             runtime = self._active
             if runtime is None or time.monotonic_ns() < runtime.deadline_ns:
                 return
+        self._time_out(runtime, "request deadline")
+
+    def _time_out(self, runtime: RuntimeRequest, reason: str) -> None:
+        with self._lock:
+            if not self._is_current(runtime):
+                return
             if runtime.vlm_goal_handle is not None:
                 runtime.vlm_goal_handle.cancel_goal_async()
-            self._tasks.force_terminal(
-                runtime.task, PipelineState.TIMED_OUT, "request deadline"
-            )
+            self._tasks.force_terminal(runtime.task, PipelineState.TIMED_OUT, reason)
             self._active = None
             self._publish_status(runtime.task, "timed_out")
             self._finish_metrics(runtime.task.request_id, "timed_out")
@@ -647,24 +939,40 @@ class CognitiveManagerNode(Node):
         with self._lock:
             active = self._active
             waiting_task_id = self._tasks.waiting_task_id
+            dependencies = {
+                "memory": self._memory_client.service_is_ready(),
+                "frame": self._frame_client.service_is_ready(),
+                "intent_router": self.count_publishers(self._routed_topic) > 0,
+                "tts": self._tts_client.server_is_ready(),
+                "vlm": self._vlm_client.server_is_ready(),
+            }
+            base_ready = (
+                dependencies["intent_router"]
+                and dependencies["tts"]
+                and dependencies["vlm"]
+            )
+            mode_readiness: dict[str, bool] = {}
+            for mode in ROUTE_MODES:
+                requirements = self._context_policy.requirements_for(mode)
+                mode_readiness[mode] = bool(
+                    base_ready
+                    and (
+                        not requirements.needs_task_memory
+                        or dependencies["memory"]
+                    )
+                    and (not requirements.needs_vision or dependencies["frame"])
+                )
+            active_mode = active.policy.mode if active else ""
             payload = {
                 "schema_version": "flzat.high_health.v2",
                 "run_id": self._tasks.run_id,
                 "node": self.get_name(),
-                "ready": (
-                    self._memory_client.service_is_ready()
-                    and self._vlm_client.server_is_ready()
-                    and self._tts_client.server_is_ready()
-                    and (self._text_enabled or self._stt_client.server_is_ready())
-                    and self._frame_client.service_is_ready()
+                "ready": mode_readiness.get(
+                    active_mode, mode_readiness["task_command"]
                 ),
-                "dependencies": {
-                    "memory": self._memory_client.service_is_ready(),
-                    "frame": self._frame_client.service_is_ready(),
-                    "stt": self._stt_client.server_is_ready(),
-                    "tts": self._tts_client.server_is_ready(),
-                    "vlm": self._vlm_client.server_is_ready(),
-                },
+                "dependencies": dependencies,
+                "mode_readiness": mode_readiness,
+                "active_mode": active_mode,
                 "active_task_id": active.task.task_id if active else "",
                 "active_request_id": active.task.request_id if active else "",
                 "waiting_clarification_task_id": waiting_task_id,
@@ -686,6 +994,102 @@ class CognitiveManagerNode(Node):
         goal = TextToSpeech.Goal()
         goal.text = value
         self._tts_client.send_goal_async(goal)
+
+    def _remember_turn(self, runtime: RuntimeRequest, assistant: str) -> None:
+        if not assistant.strip():
+            return
+        try:
+            self._conversation.append(
+                runtime.policy.mode,
+                runtime.task.latest_transcript,
+                assistant,
+            )
+        except ValueError as exc:
+            self.get_logger().warn(f"Conversation turn was not stored: {exc}")
+
+    def _write_initial_artifacts(self, runtime: RuntimeRequest) -> None:
+        task = runtime.task
+        self._request_writer.write_json(
+            task.run_id,
+            task.task_id,
+            task.request_id,
+            "transcript.json",
+            {
+                "schema_version": "flzat.transcript.v1",
+                "task_id": task.task_id,
+                "request_id": task.request_id,
+                "mode": runtime.policy.mode,
+                "transcript": task.latest_transcript,
+            },
+        )
+        self._request_writer.write_json(
+            task.run_id,
+            task.task_id,
+            task.request_id,
+            "router.json",
+            runtime.router_record,
+        )
+        self._request_writer.write_json(
+            task.run_id,
+            task.task_id,
+            task.request_id,
+            "context_policy.json",
+            {
+                "schema_version": "flzat.context_policy.v1",
+                **runtime.policy.as_dict(),
+            },
+        )
+
+    def _write_prompt_metadata(
+        self,
+        runtime: RuntimeRequest,
+        prompt: ComposedPrompt,
+        attempt: int,
+    ) -> None:
+        filename = (
+            "prompt_metadata.json"
+            if attempt == 1
+            else f"prompt_metadata_{attempt:02d}.json"
+        )
+        self._request_writer.write_json(
+            runtime.task.run_id,
+            runtime.task.task_id,
+            runtime.task.request_id,
+            filename,
+            {
+                "schema_version": "flzat.prompt_metadata.v1",
+                "attempt": attempt,
+                "profile": prompt.profile,
+                "version": prompt.version,
+                "mode": prompt.mode,
+                "output_schema": prompt.output_schema,
+                "validator": prompt.validator,
+                "prompt_hash": prompt.prompt_hash,
+                "sections": list(prompt.sections),
+                "context_refs": list(prompt.context_refs),
+            },
+        )
+
+    def _empty_snapshot(self, request_id: str) -> ContextSnapshot:
+        return ContextSnapshot(
+            request_id=request_id,
+            environment_id=self._environment_id,
+            map_id=self._map_id,
+            items=(),
+            truncated=False,
+        )
+
+    def _trusted_config_path(self, parameter: str, filename: str) -> str:
+        configured = self._text_parameter(parameter)
+        if configured:
+            return configured
+        from ament_index_python.packages import get_package_share_directory
+
+        return str(
+            Path(get_package_share_directory("flzat_cognitive_pipeline"))
+            / "config"
+            / filename
+        )
 
     @staticmethod
     def _memory_candidate(message, score: float) -> MemoryCandidate:
@@ -711,7 +1115,6 @@ class CognitiveManagerNode(Node):
         return str(self.get_parameter(name).value).strip()
 
     def destroy_node(self) -> None:
-        self._stt_client.destroy()
         self._vlm_client.destroy()
         self._tts_client.destroy()
         super().destroy_node()

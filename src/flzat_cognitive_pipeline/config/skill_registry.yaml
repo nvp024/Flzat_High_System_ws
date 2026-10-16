@@ -1,0 +1,10 @@
+skills:
+  - name: navigate
+    allowed_intents: [navigate]
+  - name: find_object
+    allowed_intents: [find_object]
+  - name: fetch_object
+    allowed_intents: [fetch_object]
+  - name: manipulate_object
+    allowed_intents: [manipulate_object]
+

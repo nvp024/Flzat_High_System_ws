@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+from typing import Any
 
 
 class ArtifactConflictError(RuntimeError):
@@ -95,3 +96,71 @@ class CommandArtifactWriter:
     def _validate_id(value: str, name: str) -> None:
         if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in value):
             raise ValueError(f"{name} contains unsafe characters")
+
+
+class RequestArtifactWriter:
+    """Write immutable per-request evidence without exposing it to Low System."""
+
+    def __init__(self, output_root: Path) -> None:
+        self.output_root = output_root.expanduser().resolve()
+        self._lock = threading.Lock()
+
+    def write_json(
+        self,
+        run_id: str,
+        task_id: str,
+        request_id: str,
+        filename: str,
+        value: dict[str, Any],
+    ) -> Path:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return self.write_text(run_id, task_id, request_id, filename, payload)
+
+    def write_text(
+        self,
+        run_id: str,
+        task_id: str,
+        request_id: str,
+        filename: str,
+        payload: str,
+    ) -> Path:
+        for name, value in (
+            ("run_id", run_id),
+            ("task_id", task_id),
+            ("request_id", request_id),
+        ):
+            CommandArtifactWriter._validate_id(value, name)
+        self._validate_filename(filename)
+        directory = self.output_root / run_id / task_id / request_id
+        path = directory / filename
+        with self._lock:
+            directory.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                if path.read_text(encoding="utf-8") != payload:
+                    raise ArtifactConflictError(
+                        f"request artifact already has other bytes: {filename}"
+                    )
+                return path
+            CommandArtifactWriter._atomic_write(path, payload)
+        return path
+
+    @staticmethod
+    def _validate_filename(filename: str) -> None:
+        path = Path(filename)
+        if (
+            not filename
+            or path.name != filename
+            or path.suffix not in {".json", ".txt"}
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+                for character in filename
+            )
+        ):
+            raise ValueError("artifact filename is unsafe")
