@@ -13,6 +13,30 @@ Voice → VAD → English STT → Safety Guard → Intent Router
 `flzat_high_system_ws` is the canonical source workspace. Older workspaces are
 kept only as references and are not runtime dependencies.
 
+## Current development status
+
+**Last updated: 16/10/2026**
+
+The ROS 2 voice-command pipeline is complete at the Proof-of-Concept and
+integration level. Voice or text input can pass through VAD, English STT,
+intent routing, read-only RAG retrieval, prompt composition, Qwen3-VL, JSON
+validation, and ROS 2 command publication. The pipeline has been exercised
+locally with test adapters and on a cloud GPU with the real Qwen3-VL backend.
+
+The system currently supports per-request context preprocessing using
+read-only RAG results, bounded conversation history, and mode-specific context
+policies. Dynamic context management is not yet implemented. In particular,
+the pipeline does not yet detect, reconcile, invalidate, or propagate changes
+in the environment, task state, object state, or dialogue context over time.
+
+Environment memory is currently read-only. A continuous memory-update loop for
+ingesting new observations, validating and deduplicating records, updating
+objects and relationships, generating embeddings, and upserting data into
+Chroma has not yet been implemented.
+
+Therefore, the current milestone proves the voice-to-command pipeline, but it
+does not yet represent a complete continuously learning cognitive system.
+
 ## Workspace structure
 
 - `flzat_speech`: VAD, English STT, and TTS.
@@ -33,7 +57,7 @@ The routing boundary classifies `task_command`, `visual_qa`, `general_qa`,
 `social_dialogue`, and `clarification` with cached semantic embeddings. Safety
 commands bypass semantic inference and publish a high-level cancel request.
 
-The Phase 2 adaptive-context boundary is also active:
+The Phase 2 per-request adaptive-context boundary is also active:
 
 - `task_command` uses the camera, environment RAG, trusted skill registry, and
   safety policy;
@@ -46,6 +70,10 @@ The Phase 2 adaptive-context boundary is also active:
 `ContextPolicy` reloads the trusted mode rules from YAML and canonicalizes the
 flags supplied by the router. Only `task_command` can reach the trusted command
 assembler and publish `/flzat/high_system/command`.
+
+This boundary selects and freezes context for one request. It must not be
+confused with dynamic context tracking or memory updates, which are outside the
+current implementation.
 
 The Phase 3 output boundary is active:
 
