@@ -57,6 +57,25 @@ camera/memory chỉ ảnh hưởng readiness của mode cần dependency tương
 
 ## Output theo mode
 
+Trước inference chính, Manager có thể gọi `/vlm/run` với
+`request_id=<request_id>-routing`, ảnh rỗng và prompt `routing/`.
+Output phân loại có đúng bốn field:
+
+```json
+{
+  "mode": "general_qa",
+  "relation_to_pending": "continue",
+  "needs_clarification": false,
+  "clarification_question": null
+}
+```
+
+`mode` thuộc general_qa/visual_qa/task_command/social_dialogue; null chỉ được
+phép khi cần hỏi lại. `continue` chỉ hợp lệ nếu có task chờ clarification;
+`new_request` tạo task mới khi người dùng đổi chủ đề. Output này không phải
+High Command và không được gửi xuống Low System. Sau khi phân loại hợp lệ,
+Manager lấy context theo mode và gọi inference chính với các schema bên dưới.
+
 | Mode | Schema | Kết quả |
 |---|---|---|
 | `task_command` | `ModelDecision.v1` | trusted High Command hoặc clarification |

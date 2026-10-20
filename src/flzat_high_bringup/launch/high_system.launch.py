@@ -137,6 +137,12 @@ def generate_launch_description():
         DeclareLaunchArgument("fake_transcript", default_value="go to the water cup"),
         DeclareLaunchArgument("fake_vlm_response", default_value=DEFAULT_FAKE_RESPONSE),
         DeclareLaunchArgument("fake_vlm_second_response", default_value=""),
+        DeclareLaunchArgument(
+            "fake_routing_response",
+            default_value='{"mode":null,"relation_to_pending":"new_request",'
+            '"needs_clarification":true,'
+            '"clarification_question":"Could you clarify your request?"}',
+        ),
         DeclareLaunchArgument("fake_vlm_delay_s", default_value="0.0"),
         DeclareLaunchArgument("fake_vlm_ignore_cancel", default_value="false"),
         DeclareLaunchArgument("low_transition_delay_s", default_value="0.1"),
@@ -264,6 +270,9 @@ def generate_launch_description():
                 ),
                 "second_response_text": ParameterValue(
                     LaunchConfiguration("fake_vlm_second_response"), value_type=str
+                ),
+                "routing_response_text": ParameterValue(
+                    LaunchConfiguration("fake_routing_response"), value_type=str
                 ),
             }],
         ),

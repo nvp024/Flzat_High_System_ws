@@ -1,0 +1,5 @@
+Choose the mode and relation_to_pending for the latest utterance.
+For a continuation, classify the complete request, not the short answer in isolation.
+For a new request, ignore the previous request when choosing its mode.
+Do not use environment objects or imagine missing visual evidence.
+If information is genuinely missing, ask one relevant English question.

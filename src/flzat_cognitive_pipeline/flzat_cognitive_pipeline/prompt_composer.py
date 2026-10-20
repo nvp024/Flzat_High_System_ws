@@ -159,6 +159,25 @@ class PromptComposer:
             sections_are_complete=True,
         )
 
+    def compose_routing(
+        self, transcript: str, pending: dict[str, Any] | None,
+    ) -> ComposedPrompt:
+        """Compose a short, text-only classifier request without RAG or vision."""
+        system = self._join(("routing/system.txt",))
+        user = self._join(("routing/task.txt", "routing/output.txt"))
+        user += "\n\nRUNTIME_INPUT_JSON\n" + json.dumps(
+            {"latest_utterance": transcript, "pending_request": pending},
+            ensure_ascii=False, sort_keys=True, allow_nan=False,
+        )
+        return ComposedPrompt(
+            system_prompt=system, user_prompt=user, profile="flzat_routing_v1",
+            version="1.0.0", mode="routing", output_schema="SemanticRoute.v1",
+            validator="semantic_route_v1",
+            prompt_hash=hashlib.sha256((system + "\0" + user).encode()).hexdigest(),
+            sections=("routing/system.txt", "routing/task.txt", "routing/output.txt"),
+            context_refs=(),
+        )
+
     def _discover_profiles(self) -> dict[str, PromptProfile]:
         profiles: dict[str, PromptProfile] = {}
         for manifest_path in sorted(self.root.glob("*/manifest.json")):

@@ -110,11 +110,9 @@ class ContextPolicy:
         self,
         mode: str,
         proposed_flags: Mapping[str, bool],
-        *,
-        continuation_mode: str = "",
     ) -> ContextRequirements:
         routed_mode = mode.strip()
-        effective_mode = continuation_mode.strip() or routed_mode
+        effective_mode = routed_mode
         if effective_mode not in ROUTE_MODES:
             raise ContextPolicyError(f"unsupported route mode: {effective_mode}")
         if any(name not in proposed_flags for name in CONTEXT_FLAGS):
@@ -127,8 +125,6 @@ class ContextPolicy:
             )
 
         canonical = dict(self._canonical[effective_mode])
-        if continuation_mode:
-            canonical["needs_conversation_memory"] = True
         corrected = tuple(
             name
             for name in CONTEXT_FLAGS

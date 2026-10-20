@@ -11,7 +11,8 @@ Microphone or text command
   -> English STT
   -> Safety Guard
   -> Intent Router
-  -> Read-only RAG retrieval
+  -> Optional text-only Qwen routing (uncertain input or pending clarification)
+  -> Context selection (RAG / image / dialogue as required)
   -> Modular Prompt Composer
   -> Qwen3-VL
   -> JSON validation and normalization
@@ -31,7 +32,7 @@ Available now:
 - direct text-command input for testing without a microphone, VAD, or STT;
 - live-camera and static-image frame providers;
 - semantic intent routing for task commands, visual QA, general QA, social
-  dialogue, and clarification;
+  dialogue, with Qwen fallback for uncertain routing and clarification replies;
 - read-only retrieval from an existing Chroma semantic-memory database;
 - modular, manifest-driven prompt composition;
 - real Qwen3-VL and fake VLM backends;
@@ -49,6 +50,55 @@ Not implemented yet:
 
 The current memory integration is read-only. It can retrieve existing semantic
 records but does not update the Chroma database.
+
+### Conditional Qwen routing and clarification
+
+Confident embedding routes proceed directly to the selected prompt profile.
+An embedding `clarification` result now triggers a short, text-only Qwen
+classification call before any RAG retrieval or camera lookup. Every reply while
+a clarification is pending also goes through this step, even if its standalone
+embedding route is confident.
+
+The routing call selects `general_qa`, `visual_qa`, `task_command`, or
+`social_dialogue`, decides `continue` versus `new_request`, and asks a relevant
+question only if information is actually missing. An unresolved category may be
+`null` while asking for clarification. There is no automatic
+`clarification -> task_command` conversion.
+
+For a continuation, the main inference receives the original transcript and
+question/answer history with the resolved mode's specialized prompt. An
+independent request cancels the pending task and starts a new task with clean
+history. The same loaded VLM serves both calls; confident requests still need
+only the main inference. `stop`/cancel bypasses routing inference.
+
+Example: `Who is the president?` -> `Which country do you mean?` -> `America`
+stays in general QA. Asking `What is the capital of Japan?` instead starts a new
+general-QA task. General QA does not query object memory or request an image.
+This routing change does not add a live external-knowledge provider.
+
+Routing goals use `<request_id>-routing`; main inference keeps `<request_id>`.
+The request directory contains `routing_prompt.txt`, `routing_response.txt`,
+and `resolved_routing.json` (when routing succeeds), alongside normal inference
+artifacts. For a topic switch, `routing_source_request` links the new task to
+the classification performed under the previous task. Initial `router.json`
+records the embedding decision; `resolved_routing.json` records the final mode
+and effective context policy. Invalid routing output fails closed without RAG
+or Low-System dispatch. Routing and main inference share the request timeout.
+
+Fake VLM uses separate routing and main response fixtures. Configure the routing
+fixture with `fake_routing_response` at launch, or set the running node:
+
+```bash
+ros2 param set /fake_vlm_server routing_response_text \
+  '{"mode":"general_qa","relation_to_pending":"new_request","needs_clarification":false,"clarification_question":null}'
+ros2 param set /fake_vlm_server response_text \
+  '{"reply":"This is a scripted general-QA response.","speak":true,"requires_robot_action":false}'
+```
+
+Use `relation_to_pending:"continue"` to test a clarification answer. The fake
+server also accepts independent `routing_response_sequence` and
+`response_sequence` string-array parameters for scripted multi-turn tests.
+These fixtures test orchestration, not semantic classification accuracy.
 
 ## Workspace layout
 

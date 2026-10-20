@@ -22,11 +22,13 @@ _ALLOWED: dict[PipelineState, set[PipelineState]] = {
     PipelineState.CONTEXT_RETRIEVAL: {
         PipelineState.PROMPT_READY,
         PipelineState.REJECTED,
+        PipelineState.WAITING_CLARIFICATION,
     },
     PipelineState.PROMPT_READY: {PipelineState.VLM_QUEUED},
     PipelineState.VLM_QUEUED: {PipelineState.VLM_ACTIVE, PipelineState.REJECTED},
     PipelineState.VLM_ACTIVE: {PipelineState.OUTPUT_VALIDATING},
     PipelineState.OUTPUT_VALIDATING: {
+        PipelineState.CONTEXT_RETRIEVAL,
         PipelineState.VLM_QUEUED,
         PipelineState.WAITING_CLARIFICATION,
         PipelineState.RESPONSE_ONLY,
@@ -91,6 +93,9 @@ class TaskRunStore:
         self,
         transcript: str,
         mode: str = "task_command",
+        *,
+        resume: bool = False,
+        defer_clarification: bool = False,
     ) -> TaskRecord:
         value = transcript.strip()
         if not value:
@@ -99,12 +104,18 @@ class TaskRunStore:
         if not route_mode:
             raise ValueError("task mode cannot be empty")
         if self._waiting_task_id:
+            if not resume:
+                raise TaskStateError("pending clarification requires explicit routing")
             task = self._tasks[self._waiting_task_id]
-            if len(task.clarification_history) >= self._max_clarifications:
+            if (
+                not defer_clarification
+                and len(task.clarification_history) >= self._max_clarifications
+            ):
                 raise TaskStateError("clarification limit reached")
             question = task.pending_question
-            task.clarification_history.append((question, value))
-            task.pending_question = ""
+            if not defer_clarification:
+                task.clarification_history.append((question, value))
+                task.pending_question = ""
             task.latest_transcript = value
             task.mode = route_mode
             request_count = self._request_counts[task.task_id] + 1
@@ -128,6 +139,17 @@ class TaskRunStore:
         self._tasks[task.task_id] = task
         self.transition(task, PipelineState.CONTEXT_RETRIEVAL, "transcript accepted")
         return task
+
+    def complete_clarification(self, task: TaskRecord) -> None:
+        """Commit an answer only after the router explicitly chose continuation."""
+        if not task.pending_question:
+            raise TaskStateError("no pending question to continue")
+        if len(task.clarification_history) >= self._max_clarifications:
+            raise TaskStateError("clarification limit reached")
+        task.clarification_history.append(
+            (task.pending_question, task.latest_transcript)
+        )
+        task.pending_question = ""
 
     def transition(
         self,

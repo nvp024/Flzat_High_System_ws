@@ -322,6 +322,8 @@ class SemanticIntentRouter:
             best_score < self.config.minimum_confidence
             or best_score - second_score < self.config.minimum_margin
         ):
+            # "clarification" is a request for semantic fallback, not permission
+            # to ask about an object. The manager resolves it through Qwen.
             selected_mode = "clarification"
         else:
             selected_mode = best_mode

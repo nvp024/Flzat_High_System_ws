@@ -45,3 +45,24 @@ def test_low_mock_correlates_commands_by_run_and_command_id():
     )
     assert "command_key = (run_id, command_id)" in source
     assert "self._commands[command_key]" in source
+
+
+def test_fake_routing_sequence_does_not_consume_main_responses():
+    import threading
+    from types import SimpleNamespace
+    from flzat_high_bringup.fake_servers import FakeVlmServer
+
+    values = {
+        "routing_response_sequence": ["routing-1", "routing-2"],
+        "response_sequence": ["main", "repair"],
+    }
+    fake = SimpleNamespace(
+        _response_lock=threading.Lock(),
+        _response_index=0,
+        _routing_response_index=0,
+        get_parameter=lambda name: SimpleNamespace(value=values[name]),
+    )
+    assert FakeVlmServer._next_routing_response(fake) == "routing-1"
+    assert FakeVlmServer._next_response(fake) == "main"
+    assert FakeVlmServer._next_routing_response(fake) == "routing-2"
+    assert FakeVlmServer._next_response(fake) == "repair"

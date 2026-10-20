@@ -35,7 +35,7 @@ def test_clarification_answer_resumes_same_task_with_new_request():
         current.transition(task, state, "test")
     current.wait_for_clarification(task, "Which bottle?")
 
-    resumed = current.accept_transcript("the blue one")
+    resumed = current.accept_transcript("the blue one", resume=True)
 
     assert resumed is task
     assert resumed.task_id == "task-0001"
@@ -80,7 +80,7 @@ def test_clarification_limit_is_enforced():
     ):
         current.transition(task, state, "test")
     current.wait_for_clarification(task, "Which cup?")
-    current.accept_transcript("the red cup")
+    current.accept_transcript("the red cup", resume=True)
     for state in (
         PipelineState.PROMPT_READY,
         PipelineState.VLM_QUEUED,
@@ -91,7 +91,7 @@ def test_clarification_limit_is_enforced():
     current.wait_for_clarification(task, "Where is it?")
 
     with pytest.raises(TaskStateError, match="limit"):
-        current.accept_transcript("on the table")
+        current.accept_transcript("on the table", resume=True)
 
 
 def test_route_mode_is_stored_and_canonicalized_on_resume():
@@ -106,7 +106,7 @@ def test_route_mode_is_stored_and_canonicalized_on_resume():
         current.transition(task, state, "test")
     current.wait_for_clarification(task, "Which object?")
 
-    resumed = current.accept_transcript("the book", "task_command")
+    resumed = current.accept_transcript("the book", "task_command", resume=True)
 
     assert resumed.mode == "task_command"
     assert resumed.task_id == task.task_id

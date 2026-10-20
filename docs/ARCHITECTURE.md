@@ -13,6 +13,9 @@ text hook ───────────────────────�
                                                                      ▼
                                                             CognitiveManager
                                                                      │
+                    ├─ uncertain/pending turn → text-only Qwen routing
+                    │    ├─ resolved → mode + continue/new request
+                    │    └─ missing information → relevant question → wait
                     ├─ ContextPolicy → canonical mode requirements
                     ├─ AdaptiveContextBuilder → trusted bounded providers
                     ├─ QueryMemory → read-only Chroma (conditional)
@@ -25,6 +28,15 @@ text hook ───────────────────────�
 Router dùng sentence-transformer, cache embedding của route examples khi khởi
 động và chỉ encode user utterance cho mỗi request. Safety Guard chạy trước
 semantic routing và phát high-level cancel mà không gọi RAG hoặc VLM.
+
+Từ 20/10/2026, route `clarification` của embedding chỉ yêu cầu phân loại bổ sung.
+Manager gọi Qwen bằng `prompts/routing/` trước RAG/frame; mọi lượt có task đang
+chờ clarification cũng được kiểm tra `continue` hay `new_request`.
+Không còn ép `clarification -> task_command`. Qwen trả mode đã xác định hoặc
+null nếu chưa đủ thông tin, cùng câu hỏi làm rõ nếu cần.
+Continuation giữ câu gốc và lịch sử question/answer trong prompt chuyên biệt.
+New request kết thúc task đang chờ và tạo task mới với lịch sử riêng.
+Routing output sai schema bị reject; không được chuyển sang task mặc định.
 
 Manager không tin trực tiếp các context flag trong `RoutedCommand`.
 `ContextPolicy` đọc cùng route rules từ YAML rồi canonicalize yêu cầu theo mode.
@@ -40,7 +52,8 @@ Adaptive context hiện đã hoạt động:
 - `visual_qa`: frame, không environment RAG;
 - `general_qa`: text-only;
 - `social_dialogue`: bounded conversation + read-only user profile;
-- `clarification`: bounded conversation/task history.
+- `clarification`: trạng thái chờ thông tin; nhánh routing chỉ nhận câu gốc,
+  câu mới, mode đã biết, lịch sử làm rõ và câu hỏi đang chờ.
 
 Conversation và user profile không được trộn vào Chroma object database. Skill
 registry và safety policy là trusted YAML context, không phải semantic RAG.
@@ -62,6 +75,16 @@ PromptComposer discover năm manifest và kiểm tra chuỗi contract
 - `general_qa` → `GeneralQA.v1`;
 - `social_dialogue` → `SocialDialogue.v1`;
 - `clarification` → `Clarification.v1`.
+
+Profile clarification cũ được giữ tương thích với validator, nhưng route
+clarification từ embedding hiện đi qua `SemanticRoute.v1` trước. Prompt routing
+riêng gồm ba file system/task/output, không tham gia danh sách profile inference
+chính. General/visual QA cho phép lịch sử clarification của chính task.
+
+Routing sử dụng cùng `/vlm/run`, với request ID có hậu tố `-routing`, ảnh rỗng,
+và hash riêng. Main inference giữ request ID gốc. Cả hai dùng chung deadline và
+cancellation; callback cũ không được tiếp tục task đã hủy. Fake VLM có fixture
+routing riêng để không tiêu thụ response dành cho main inference/repair.
 
 Nếu output sai schema, Manager dùng lại chính Qwen, frozen frame và context
 snapshot để repair tối đa hai lần. Repair không query RAG/camera lại và vẫn

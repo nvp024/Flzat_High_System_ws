@@ -64,8 +64,17 @@ class FakeVlmServer(Node):
         self.declare_parameter("ignore_cancel", False)
         self.declare_parameter("response_sequence", [""])
         self.declare_parameter("second_response_text", "")
+        # Routing has its own fixtures so it cannot consume a main/repair response.
+        self.declare_parameter(
+            "routing_response_text",
+            '{"mode":null,"relation_to_pending":"new_request",'
+            '"needs_clarification":true,'
+            '"clarification_question":"Could you clarify your request?"}',
+        )
+        self.declare_parameter("routing_response_sequence", [""])
         self._response_lock = threading.Lock()
         self._response_index = 0
+        self._routing_response_index = 0
         self._server = ActionServer(
             self,
             RunVlm,
@@ -112,13 +121,30 @@ class FakeVlmServer(Node):
             result.error_message = "configured fake failure"
             return result
         result.success = True
-        result.response_text = self._next_response()
+        result.response_text = (
+            self._next_routing_response()
+            if result.request_id.endswith("-routing")
+            else self._next_response()
+        )
         result.error_message = ""
         if goal_handle.is_cancel_requested:
             goal_handle.abort()
         else:
             goal_handle.succeed()
         return result
+
+    def _next_routing_response(self) -> str:
+        """Return configured classifier fixtures, without pretending to classify."""
+        sequence = tuple(
+            str(value) for value in self.get_parameter("routing_response_sequence").value
+            if str(value).strip()
+        )
+        with self._response_lock:
+            if not sequence:
+                return str(self.get_parameter("routing_response_text").value)
+            index = min(self._routing_response_index, len(sequence) - 1)
+            self._routing_response_index += 1
+            return sequence[index]
 
     def _next_response(self) -> str:
         sequence = tuple(

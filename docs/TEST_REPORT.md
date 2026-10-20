@@ -1,6 +1,41 @@
 # Test Report
 
-Ngày cập nhật: **2026-10-15**.
+Ngày cập nhật: **2026-10-20**.
+
+## Conditional Qwen routing — 20/10/2026
+
+- Build riêng `flzat_cognitive_pipeline` và `flzat_high_bringup` thành công trong
+  build/install tạm; dùng các ROS interfaces/dependencies đã build sẵn.
+- **145 tests passed**, bao gồm test ROS topic/action thật với production Manager
+  và FakeVlmServer. Không load Qwen, không cần GPU, RAG server, camera hoặc TTS.
+- Đã kiểm tra: route chắc chắn chỉ gọi inference chính; route chưa chắc gọi
+  classifier rồi main; "America" tiếp tục câu hỏi tổng thống với đầy đủ history;
+  câu hỏi thủ đô mới tạo task mới; trả lời "the book" chỉ bật task RAG sau khi
+  classifier xác định task_command.
+- General-QA validator từ chối output find_object/ball; routing JSON sai, ID
+  cũ, timeout, cancel và goal acceptance đến trễ không được dispatch command.
+- Fake routing có response sequence độc lập với main/repair. Giới hạn số lượt
+  clarification vẫn được kiểm tra, nhưng không chặn chuyển sang yêu cầu mới.
+- Prompt/accuracy/latency của classifier Qwen thật vẫn cần test trên cloud.
+  Test fake xác nhận luồng, không chứng minh model phân loại chính xác mọi câu.
+
+Chạy lại từ workspace sau khi source ROS và `install/setup.bash`:
+
+```bash
+export PYTHONPATH="$PWD/src/flzat_cognitive_pipeline:$PWD/src/flzat_memory:$PWD/src/flzat_high_bringup:$PWD/src/flzat_vlm:$PWD/src/flzat_speech:$PWD/src/flzat_vision_context:$PYTHONPATH"
+export ROS_DOMAIN_ID=183
+export ROS_LOG_DIR=/tmp/flzat-routing-test-logs
+export FLZAT_RUN_ROS_TESTS=1
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  src/flzat_cognitive_pipeline/test src/flzat_memory/test \
+  src/flzat_high_bringup/test src/flzat_vlm/test \
+  src/flzat_speech/test src/flzat_vision_context/test -q
+```
+
+Dùng ROS domain riêng chưa có node khác. `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`
+tránh xung đột plugin launch_testing cũ với pytest trong môi trường local;
+test tích hợp ROS ở trên tự tạo executor và không cần plugin đó.
+Các kết quả bên dưới là lịch sử kiểm thử trước thay đổi routing.
 
 ## Đã xác nhận local
 

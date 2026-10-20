@@ -58,6 +58,7 @@ from flzat_cognitive_pipeline.routing import (
     LowStatusAdapter,
     build_low_cancel,
 )
+from flzat_cognitive_pipeline.semantic_routing import parse_semantic_route
 from flzat_cognitive_pipeline.task_store import TaskRunStore, TaskStateError
 from flzat_cognitive_pipeline.telemetry import PipelineTelemetry
 from flzat_cognitive_pipeline.transcript import is_usable_transcript
@@ -75,6 +76,8 @@ class RuntimeRequest:
     frame: CompressedImage | None = None
     attempts_sent: int = 0
     vlm_goal_handle: object | None = None
+    routing_pending: dict[str, object] | None = None
+    routing_stage: bool = False
 
 
 class CognitiveManagerNode(Node):
@@ -282,14 +285,13 @@ class CognitiveManagerNode(Node):
         if message.mode == "safety_stop":
             # The router also publishes the canonical high-level cancel event.
             return
+        if message.mode not in ROUTE_MODES:
+            self.get_logger().warn("Ignored unsupported routed command mode.")
+            return
         with self._lock:
             waiting_id = self._tasks.waiting_task_id
             waiting = self._tasks.get(waiting_id) if waiting_id else None
-        continuation_mode = ""
-        if waiting is not None:
-            continuation_mode = (
-                "task_command" if waiting.mode == "clarification" else waiting.mode
-            )
+        needs_routing = waiting is not None or message.mode == "clarification"
         proposed_flags = {
             "needs_vision": bool(message.needs_vision),
             "needs_task_memory": bool(message.needs_task_memory),
@@ -299,14 +301,13 @@ class CognitiveManagerNode(Node):
         }
         try:
             policy = self._context_policy.resolve(
-                message.mode,
+                "clarification" if needs_routing else message.mode,
                 proposed_flags,
-                continuation_mode=continuation_mode,
             )
         except ContextPolicyError as exc:
             self.get_logger().warn(f"Routed command rejected by context policy: {exc}")
             return
-        if policy.corrected_flags:
+        if policy.corrected_flags and not needs_routing:
             self.get_logger().warn(
                 "ContextPolicy corrected untrusted router flags: "
                 + ", ".join(policy.corrected_flags)
@@ -332,6 +333,7 @@ class CognitiveManagerNode(Node):
                 },
                 "latency_ms": float(message.latency_ms),
             },
+            needs_routing=needs_routing,
         )
 
     def _accept_transcript(
@@ -340,13 +342,34 @@ class CognitiveManagerNode(Node):
         source: str,
         policy: ContextRequirements,
         router_record: dict[str, object],
+        *,
+        needs_routing: bool = False,
     ) -> None:
         with self._lock:
             if self._active is not None:
                 self.get_logger().warn("Ignored transcript while a request is active.")
                 return
             try:
-                task = self._tasks.accept_transcript(transcript, policy.mode)
+                waiting_id = self._tasks.waiting_task_id
+                pending = None
+                if waiting_id:
+                    waiting = self._tasks.get(waiting_id)
+                    pending = {
+                        "original_transcript": waiting.original_transcript,
+                        "mode": (
+                            None if waiting.mode == "clarification" else waiting.mode
+                        ),
+                        "clarification_history": [
+                            {"question": q, "answer": a}
+                            for q, a in waiting.clarification_history
+                        ],
+                        "pending_question": waiting.pending_question,
+                    }
+                task = self._tasks.accept_transcript(
+                    transcript, policy.mode,
+                    resume=needs_routing and bool(waiting_id),
+                    defer_clarification=needs_routing,
+                )
             except (ValueError, TaskStateError) as exc:
                 self.get_logger().warn(f"Transcript rejected: {exc}")
                 return
@@ -355,6 +378,8 @@ class CognitiveManagerNode(Node):
                 deadline_ns=time.monotonic_ns() + self._request_timeout_ns,
                 policy=policy,
                 router_record=router_record,
+                routing_pending=pending,
+                routing_stage=needs_routing,
             )
             self._telemetry.begin(task.request_id, task.task_id, source)
             self._active = runtime
@@ -368,12 +393,179 @@ class CognitiveManagerNode(Node):
             if not self._is_current(runtime):
                 return
             self._publish_status(task, source)
+        if needs_routing:
+            self._start_routing(runtime)
+            return
         if policy.needs_task_memory:
             self._query_memory(runtime)
         else:
             self._prepare_prompt(runtime, self._empty_snapshot(task.request_id))
 
+    def _start_routing(self, runtime: RuntimeRequest) -> None:
+        """Use the existing VLM server for text-only classification before context."""
+        try:
+            with self._lock:
+                if not self._is_current(runtime):
+                    return
+                if not self._vlm_client.server_is_ready():
+                    self._reject(runtime, "VLM routing action server is unavailable")
+                    return
+                prompt = self._prompts.compose_routing(
+                    runtime.task.latest_transcript, runtime.routing_pending,
+                )
+                task = runtime.task
+                goal = RunVlm.Goal()
+                goal.request_id = task.request_id + "-routing"
+                goal.transcript = task.latest_transcript
+                goal.system_prompt = prompt.system_prompt
+                goal.user_prompt = prompt.user_prompt
+                goal.prompt_version = prompt.version
+                goal.prompt_hash = prompt.prompt_hash
+                self._request_writer.write_text(
+                    task.run_id, task.task_id, task.request_id,
+                    "routing_prompt.txt",
+                    prompt.system_prompt + "\n\n" + prompt.user_prompt,
+                )
+                self._tasks.transition(
+                    task, PipelineState.PROMPT_READY, "routing prompt"
+                )
+                self._tasks.transition(
+                    task, PipelineState.VLM_QUEUED, "routing queued"
+                )
+                self.get_logger().info(f"[ROUTING] {task.task_id}: Qwen classification")
+                # Capture identifiers now; task.request_id can change on later turns.
+                task_id, request_id = task.task_id, task.request_id
+                future = self._vlm_client.send_goal_async(goal)
+                future.add_done_callback(
+                    lambda done: self._on_routing_goal(task_id, request_id, done)
+                )
+        except Exception as exc:
+            self._reject(runtime, f"routing dispatch failed: {exc}")
+
+    def _on_routing_goal(self, task_id: str, request_id: str, future) -> None:
+        runtime = self._current(task_id, request_id)
+        try:
+            handle = future.result()
+            with self._lock:
+                if (
+                    runtime is None or not self._is_current(runtime)
+                    or not runtime.routing_stage
+                ):
+                    if handle.accepted:
+                        handle.cancel_goal_async()
+                    return
+                if not handle.accepted:
+                    self._reject(runtime, "routing goal rejected")
+                    return
+                runtime.vlm_goal_handle = handle
+                self._telemetry.mark(request_id, "routing_queue")
+                self._tasks.transition(
+                    runtime.task, PipelineState.VLM_ACTIVE, "routing active"
+                )
+                handle.get_result_async().add_done_callback(
+                    lambda done: self._on_routing_result(task_id, request_id, done)
+                )
+        except Exception as exc:
+            if runtime is not None:
+                self._reject(runtime, f"routing goal failed: {exc}")
+
+    def _on_routing_result(self, task_id: str, request_id: str, future) -> None:
+        runtime = self._current(task_id, request_id)
+        if runtime is None:
+            return
+        try:
+            with self._lock:
+                if not self._is_current(runtime) or not runtime.routing_stage:
+                    return
+                if time.monotonic_ns() >= runtime.deadline_ns:
+                    self._time_out(runtime, "routing deadline")
+                    return
+                result = future.result().result
+                if not result.success or result.request_id != request_id + "-routing":
+                    raise ValueError("routing failed or returned a stale request_id")
+                task = runtime.task
+                self._request_writer.write_text(
+                    task.run_id, task_id, request_id, "routing_response.txt",
+                    result.response_text,
+                )
+                route = parse_semantic_route(
+                    result.response_text, has_pending=runtime.routing_pending is not None,
+                )
+                self._telemetry.mark(request_id, "routing_inference")
+                self._tasks.transition(
+                    task, PipelineState.OUTPUT_VALIDATING, "routing received"
+                )
+                if runtime.routing_pending is not None:
+                    if route.relation_to_pending == "new_request":
+                        self._tasks.force_terminal(
+                            task, PipelineState.CANCELLED, "new user request"
+                        )
+                        self._publish_status(task, "superseded_by_new_request")
+                        self._finish_metrics(request_id, "new_request")
+                        task = self._tasks.accept_transcript(
+                            task.latest_transcript, route.mode or "clarification",
+                        )
+                        runtime.task = task
+                        runtime.policy = self._context_policy.requirements_for(
+                            route.mode or "clarification"
+                        )
+                        self._telemetry.begin(
+                            task.request_id, task.task_id, "qwen_routing:new_request"
+                        )
+                        runtime.router_record = dict(runtime.router_record)
+                        runtime.router_record["routing_source_request"] = request_id
+                        self._write_initial_artifacts(runtime)
+                    else:
+                        self._tasks.complete_clarification(task)
+                task.mode = route.mode or "clarification"
+                runtime.routing_stage = False
+                runtime.vlm_goal_handle = None
+                runtime.policy = self._context_policy.requirements_for(task.mode)
+                self._request_writer.write_json(
+                    task.run_id, task.task_id, task.request_id, "resolved_routing.json",
+                    {
+                        "mode": route.mode,
+                        "relation_to_pending": route.relation_to_pending,
+                        "needs_clarification": route.needs_clarification,
+                        "clarification_question": route.clarification_question,
+                        "routing_source_request": request_id,
+                        "original_transcript": task.original_transcript,
+                        "latest_transcript": task.latest_transcript,
+                        "clarification_history": [
+                            {"question": q, "answer": a}
+                            for q, a in task.clarification_history
+                        ],
+                        "effective_context_policy": runtime.policy.as_dict(),
+                    },
+                )
+                self.get_logger().info(
+                    f"[ROUTING] {task.task_id}: {task.mode}, "
+                    f"{route.relation_to_pending}, clarify={route.needs_clarification}"
+                )
+                if route.needs_clarification:
+                    self._tasks.wait_for_clarification(
+                        task, route.clarification_question
+                    )
+                    self._active = None
+                    self._publish_status(task, "clarification_required")
+                    self._finish_metrics(task.request_id, "clarification")
+                    self._speak(route.clarification_question)
+                    return
+                if task.state != PipelineState.CONTEXT_RETRIEVAL:
+                    self._tasks.transition(
+                        task, PipelineState.CONTEXT_RETRIEVAL, "routing resolved"
+                    )
+                self._publish_status(task, "routing_resolved")
+            if runtime.policy.needs_task_memory:
+                self._query_memory(runtime)
+            else:
+                self._prepare_prompt(runtime, self._empty_snapshot(task.request_id))
+        except Exception as exc:
+            self._reject(runtime, f"routing result rejected: {exc}")
+
     def _query_memory(self, runtime: RuntimeRequest) -> None:
+        if not self._is_current(runtime):
+            return
         if not self._memory_client.service_is_ready():
             self._reject(runtime, "memory query service is unavailable")
             return
@@ -421,6 +613,8 @@ class CognitiveManagerNode(Node):
         snapshot: ContextSnapshot,
     ) -> None:
         try:
+            if not self._is_current(runtime):
+                return
             adaptive = self._adaptive_context.build(
                 runtime.policy,
                 runtime.task,
@@ -511,6 +705,11 @@ class CognitiveManagerNode(Node):
             self._reject(runtime, f"frame lookup failed: {exc}")
 
     def _send_vlm(self, runtime: RuntimeRequest, frame: CompressedImage) -> None:
+        if not self._is_current(runtime):
+            return
+        if time.monotonic_ns() >= runtime.deadline_ns:
+            self._time_out(runtime, "deadline before main inference")
+            return
         if not self._vlm_client.server_is_ready():
             self._reject(runtime, "VLM action server is unavailable")
             return
@@ -541,11 +740,12 @@ class CognitiveManagerNode(Node):
         goal.user_prompt = prompt.user_prompt
         goal.prompt_version = prompt.version
         goal.prompt_hash = prompt.prompt_hash
+        task_id, request_id = runtime.task.task_id, runtime.task.request_id
         future = self._vlm_client.send_goal_async(goal)
         future.add_done_callback(
             lambda completed: self._on_vlm_goal(
-                runtime.task.task_id,
-                runtime.task.request_id,
+                task_id,
+                request_id,
                 attempt,
                 completed,
             )
@@ -559,10 +759,12 @@ class CognitiveManagerNode(Node):
         future,
     ) -> None:
         runtime = self._current(task_id, request_id)
-        if runtime is None or runtime.attempts_sent != attempt:
-            return
         try:
             handle = future.result()
+            if runtime is None or runtime.attempts_sent != attempt:
+                if handle.accepted:
+                    handle.cancel_goal_async()
+                return
             if not handle.accepted:
                 self._reject(runtime, "VLM goal was rejected")
                 return
@@ -586,7 +788,8 @@ class CognitiveManagerNode(Node):
                 )
             )
         except Exception as exc:
-            self._reject(runtime, f"VLM dispatch failed: {exc}")
+            if runtime is not None:
+                self._reject(runtime, f"VLM dispatch failed: {exc}")
 
     def _on_vlm_result(
         self,
@@ -597,6 +800,9 @@ class CognitiveManagerNode(Node):
     ) -> None:
         runtime = self._current(task_id, request_id)
         if runtime is None or runtime.attempts_sent != attempt:
+            return
+        if time.monotonic_ns() >= runtime.deadline_ns:
+            self._time_out(runtime, "main inference deadline")
             return
         try:
             result = future.result().result
@@ -972,6 +1178,11 @@ class CognitiveManagerNode(Node):
             if vlm_values:
                 vlm_ms = sum(vlm_values)
         timing = [f"total={float(payload['total_ms']):.1f} ms"]
+        routing_ms = (
+            phase_ms.get("routing_inference") if isinstance(phase_ms, dict) else None
+        )
+        if isinstance(routing_ms, (int, float)):
+            timing.append(f"routing={float(routing_ms):.1f} ms")
         if isinstance(rag_ms, (int, float)):
             timing.append(f"rag={float(rag_ms):.1f} ms")
         if vlm_ms is not None:

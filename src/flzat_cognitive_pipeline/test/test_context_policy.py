@@ -69,17 +69,15 @@ def test_external_knowledge_is_rejected_without_provider():
         )
 
 
-def test_clarification_continuation_uses_original_task_policy():
+def test_resolved_general_question_does_not_enable_task_context():
     policy = context_policy().resolve(
         "general_qa",
         flags(),
-        continuation_mode="task_command",
     )
 
-    assert policy.mode == "task_command"
-    assert policy.needs_task_memory is True
-    assert policy.needs_vision is True
-    assert policy.needs_conversation_memory is True
+    assert policy.mode == "general_qa"
+    assert policy.needs_task_memory is False
+    assert policy.needs_vision is False
 
 
 def test_adaptive_context_keeps_conversation_separate_from_object_memory():
@@ -125,11 +123,7 @@ def test_task_clarification_uses_only_bounded_task_history():
     task = TaskRecord("run-1", "task-0001", "task-0001-r02", "get that", "book")
     task.clarification_history.append(("Which object?", "book"))
     snapshot = ContextSnapshot("task-0001-r02", "demo", "map", ())
-    policy = context_policy().resolve(
-        "clarification",
-        flags(needs_conversation_memory=True),
-        continuation_mode="task_command",
-    )
+    policy = context_policy().requirements_for("task_command")
 
     context = builder.build(policy, task, snapshot)
 

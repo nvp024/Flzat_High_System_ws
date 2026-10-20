@@ -1,0 +1,5 @@
+Return exactly these fields:
+{"mode":"general_qa|visual_qa|task_command|social_dialogue","relation_to_pending":"continue|new_request","needs_clarification":false,"clarification_question":null}
+mode may be null only when needs_clarification=true and the category is unresolved.
+When needs_clarification=true, clarification_question must be a concise question.
+Otherwise clarification_question must be null. No actions, coordinates or extra fields.
