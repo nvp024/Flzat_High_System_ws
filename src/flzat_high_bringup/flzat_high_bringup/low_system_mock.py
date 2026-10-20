@@ -176,7 +176,7 @@ class LowSystemMock(Node):
         }
         serialized = json.dumps(status, separators=(",", ":"), sort_keys=True)
         self._status_pub.publish(String(data=serialized))
-        self.get_logger().info(f"LOW_STATUS {serialized}")
+        self.get_logger().debug(f"LOW_STATUS {serialized}")
 
     def destroy_node(self) -> None:
         for stop_event in self._stop_events.values():

@@ -203,9 +203,10 @@ class VlmNode(Node):
             result.error_message = ""
             goal_handle.succeed()
             self._publish_run_feedback(goal_handle, "complete")
-            self.get_logger().info(
-                f"VLM response ({time.perf_counter() - inference_started:.2f} s): "
-                f"'{raw_response[:500]}'"
+            inference_s = time.perf_counter() - inference_started
+            self.get_logger().info(f"[VLM] Completed in {inference_s:.2f} s")
+            self.get_logger().debug(
+                f"VLM response ({inference_s:.2f} s): '{raw_response[:500]}'"
             )
             return result
         except GenerationCancelled:

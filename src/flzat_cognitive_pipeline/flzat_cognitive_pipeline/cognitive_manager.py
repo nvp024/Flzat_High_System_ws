@@ -402,6 +402,9 @@ class CognitiveManagerNode(Node):
                 self._memory_candidate(value, float(score))
                 for value, score in zip(response.objects, response.cosine_scores)
             ]
+            self.get_logger().info(
+                f"[RAG] {runtime.task.task_id}: {len(candidates)} result(s)"
+            )
             snapshot = self._context_manager.build_snapshot(
                 request_id,
                 self._environment_id,
@@ -925,7 +928,30 @@ class CognitiveManagerNode(Node):
         }
         serialized = canonical_json(payload)
         self._status_pub.publish(String(data=serialized))
-        self.get_logger().info(f"HIGH_STATUS {serialized}")
+        visible_states = {
+            PipelineState.CONTEXT_RETRIEVAL,
+            PipelineState.WAITING_CLARIFICATION,
+            PipelineState.RESPONSE_ONLY,
+            PipelineState.DISPATCHED,
+            PipelineState.LOW_RUNNING,
+            PipelineState.SUCCEEDED,
+            PipelineState.FAILED,
+            PipelineState.CANCELLED,
+            PipelineState.TIMED_OUT,
+        }
+        if task.state in visible_states:
+            detail = ""
+            if task.state in {
+                PipelineState.WAITING_CLARIFICATION,
+                PipelineState.FAILED,
+                PipelineState.CANCELLED,
+                PipelineState.TIMED_OUT,
+            }:
+                detail = f" ({reason})"
+            self.get_logger().info(
+                f"[STATUS] {task.task_id}: {task.state.value}{detail}"
+            )
+        self.get_logger().debug(f"HIGH_STATUS {serialized}")
 
     def _finish_metrics(self, request_id: str, outcome: str) -> None:
         payload = self._telemetry.finish(request_id, outcome)
@@ -933,7 +959,27 @@ class CognitiveManagerNode(Node):
             return
         serialized = canonical_json(payload)
         self._metrics_pub.publish(String(data=serialized))
-        self.get_logger().info(f"HIGH_METRICS {serialized}")
+        phase_ms = payload.get("phase_ms", {})
+        rag_ms = phase_ms.get("rag_context") if isinstance(phase_ms, dict) else None
+        vlm_ms = None
+        if isinstance(phase_ms, dict):
+            vlm_values = [
+                value
+                for key, value in phase_ms.items()
+                if key.startswith("vlm_inference_")
+                and isinstance(value, (int, float))
+            ]
+            if vlm_values:
+                vlm_ms = sum(vlm_values)
+        timing = [f"total={float(payload['total_ms']):.1f} ms"]
+        if isinstance(rag_ms, (int, float)):
+            timing.append(f"rag={float(rag_ms):.1f} ms")
+        if vlm_ms is not None:
+            timing.append(f"vlm={vlm_ms:.1f} ms")
+        self.get_logger().info(
+            f"[METRICS] {payload['task_id']}: {outcome}; " + ", ".join(timing)
+        )
+        self.get_logger().debug(f"HIGH_METRICS {serialized}")
 
     def _publish_health(self) -> None:
         with self._lock:

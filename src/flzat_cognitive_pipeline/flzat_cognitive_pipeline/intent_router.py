@@ -481,7 +481,8 @@ class IntentRouterNode(Node):
                 separators=(",", ":"),
                 allow_nan=False,
             )
-            self.get_logger().info(f"ROUTED_COMMAND {serialized}")
+            self.get_logger().info(f"[ROUTE] {decision.mode}")
+            self.get_logger().debug(f"ROUTED_COMMAND {serialized}")
             if decision.mode == SAFETY_MODE:
                 self._cancel_pub.publish(String(data=""))
         except Exception as exc:

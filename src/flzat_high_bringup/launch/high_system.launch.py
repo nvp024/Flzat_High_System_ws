@@ -3,7 +3,12 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import EqualsSubstitution, LaunchConfiguration
+from launch.substitutions import (
+    AndSubstitution,
+    EqualsSubstitution,
+    LaunchConfiguration,
+    NotSubstitution,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -32,7 +37,10 @@ def generate_launch_description():
             "/launch/flzat_vision_context.launch.py",
         ]),
         condition=IfCondition(
-            EqualsSubstitution(LaunchConfiguration("frame_source"), "camera")
+            AndSubstitution(
+                EqualsSubstitution(LaunchConfiguration("frame_source"), "camera"),
+                LaunchConfiguration("run_camera_node"),
+            )
         ),
     )
     real_vlm = IncludeLaunchDescription(
@@ -77,6 +85,26 @@ def generate_launch_description():
         DeclareLaunchArgument("use_fake_speech", default_value="false"),
         DeclareLaunchArgument("use_fake_vlm", default_value="false"),
         DeclareLaunchArgument("use_low_mock", default_value="false"),
+        DeclareLaunchArgument(
+            "run_camera_node",
+            default_value="true",
+            description="Start the hardware camera provider in this process",
+        ),
+        DeclareLaunchArgument(
+            "run_vad_node",
+            default_value="true",
+            description="Start microphone capture and VAD in this process",
+        ),
+        DeclareLaunchArgument(
+            "run_stt_node",
+            default_value="true",
+            description="Start the real speech-to-text action server",
+        ),
+        DeclareLaunchArgument(
+            "run_tts_node",
+            default_value="true",
+            description="Start the real text-to-speech action server",
+        ),
         DeclareLaunchArgument(
             "frame_source",
             default_value="camera",
@@ -147,14 +175,24 @@ def generate_launch_description():
             executable="vad_node",
             name="vad_node",
             output="screen",
-            condition=UnlessCondition(LaunchConfiguration("use_fake_speech")),
+            condition=IfCondition(
+                AndSubstitution(
+                    NotSubstitution(LaunchConfiguration("use_fake_speech")),
+                    LaunchConfiguration("run_vad_node"),
+                )
+            ),
         ),
         Node(
             package="flzat_speech",
             executable="stt_node",
             name="stt_node",
             output="screen",
-            condition=UnlessCondition(LaunchConfiguration("use_fake_speech")),
+            condition=IfCondition(
+                AndSubstitution(
+                    NotSubstitution(LaunchConfiguration("use_fake_speech")),
+                    LaunchConfiguration("run_stt_node"),
+                )
+            ),
             parameters=[{"language": "en"}],
         ),
         Node(
@@ -162,7 +200,12 @@ def generate_launch_description():
             executable="tts_node",
             name="tts_node",
             output="screen",
-            condition=UnlessCondition(LaunchConfiguration("use_fake_speech")),
+            condition=IfCondition(
+                AndSubstitution(
+                    NotSubstitution(LaunchConfiguration("use_fake_speech")),
+                    LaunchConfiguration("run_tts_node"),
+                )
+            ),
         ),
         Node(
             package="flzat_high_bringup",

@@ -90,7 +90,7 @@ class SpeechIngressNode(Node):
             transcript = future.result().result.transcript.strip()
             if transcript and any(character.isalnum() for character in transcript):
                 self._transcript_pub.publish(String(data=transcript))
-                self.get_logger().info(f"Published STT result: '{transcript}'")
+                self.get_logger().debug(f"Published STT result: '{transcript}'")
             else:
                 self.get_logger().warn("STT returned no usable transcript.")
         except Exception as exc:

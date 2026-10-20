@@ -10,6 +10,11 @@ def test_full_launch_can_switch_real_and_fake_boundaries():
     assert 'DeclareLaunchArgument("use_fake_speech"' in source
     assert 'DeclareLaunchArgument("use_fake_vlm"' in source
     assert 'DeclareLaunchArgument("use_low_mock"' in source
+    assert '"run_camera_node",' in source
+    assert '"run_vad_node",' in source
+    assert '"run_stt_node",' in source
+    assert '"run_tts_node",' in source
+    assert 'NotSubstitution(LaunchConfiguration("use_fake_speech"))' in source
     assert '"frame_source",' in source
     assert 'EqualsSubstitution(LaunchConfiguration("frame_source"), "camera")' in source
     assert 'EqualsSubstitution(LaunchConfiguration("frame_source"), "static")' in source
@@ -34,6 +39,20 @@ def test_full_launch_can_switch_real_and_fake_boundaries():
         in source
     )
     assert "do_image_splitting" not in source
+
+
+def test_local_io_launch_owns_only_hardware_boundaries():
+    source = (ROOT / "launch/local_io.launch.py").read_text(encoding="utf-8")
+
+    assert 'executable="camera_node"' not in source
+    assert '"/launch/flzat_vision_context.launch.py"' in source
+    assert 'executable="vad_node"' in source
+    assert 'executable="tts_node"' in source
+    assert 'executable="stt_node"' not in source
+    assert 'executable="speech_ingress"' not in source
+    assert 'DeclareLaunchArgument("mic_device"' in source
+    assert 'LaunchConfiguration("mic_device"), value_type=str' in source
+    assert '"debug_fps",' in source
 
 
 def test_low_mock_supports_lifecycle_and_cancel_contracts():

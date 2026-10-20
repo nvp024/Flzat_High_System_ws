@@ -287,7 +287,7 @@ class CameraNode(Node):
             self._capture_count = 0
             self._processed_count = 0
             self._dropped_count = 0
-        self.get_logger().info(
+        self.get_logger().debug(
             f"Vision health: capture={capture_count / 5.0:.1f} FPS, "
             f"processing={processed_count / 5.0:.1f} FPS, "
             f"dropped={dropped_count}, buffer={len(self._frame_buffer)}."

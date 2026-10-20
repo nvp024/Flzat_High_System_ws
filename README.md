@@ -1,203 +1,486 @@
 # FLZAT High System
 
-Unified ROS 2 workspace for the High-Level Cognitive Pipeline:
+`flzat_high_system_ws` is the main ROS 2 workspace for the FLZAT High-Level
+Cognitive Pipeline. It receives an English voice or text command, gathers the
+required visual and memory context, calls Qwen3-VL, validates the model output,
+and publishes a normalized JSON command for the Low System.
 
 ```text
-Voice → VAD → English STT → Safety Guard → Intent Router
-→ Cognitive Manager
-→ read-only RAG → modular prompt → Qwen3-VL
-→ validate/normalize JSON → clarification or High-Level Command
-→ JSON artifact + ROS 2 topic → Low System
+Microphone or text command
+  -> VAD
+  -> English STT
+  -> Safety Guard
+  -> Intent Router
+  -> Read-only RAG retrieval
+  -> Modular Prompt Composer
+  -> Qwen3-VL
+  -> JSON validation and normalization
+  -> TTS response or High-Level Command topic
 ```
 
-`flzat_high_system_ws` is the canonical source workspace. Older workspaces are
-kept only as references and are not runtime dependencies.
+This repository is self-contained at runtime. Older FLZAT workspaces are
+references only and are not imported by this workspace.
 
-## Current development status
+## Current status
 
-**Last updated: 16/10/2026**
+Last updated: **20 October 2026**
 
-The ROS 2 voice-command pipeline is complete at the Proof-of-Concept and
-integration level. Voice or text input can pass through VAD, English STT,
-intent routing, read-only RAG retrieval, prompt composition, Qwen3-VL, JSON
-validation, and ROS 2 command publication. The pipeline has been exercised
-locally with test adapters and on a cloud GPU with the real Qwen3-VL backend.
+Available now:
 
-The system currently supports per-request context preprocessing using
-read-only RAG results, bounded conversation history, and mode-specific context
-policies. Dynamic context management is not yet implemented. In particular,
-the pipeline does not yet detect, reconcile, invalidate, or propagate changes
-in the environment, task state, object state, or dialogue context over time.
+- complete ROS 2 voice path from VAD and English STT to cognitive inference;
+- direct text-command input for testing without a microphone, VAD, or STT;
+- live-camera and static-image frame providers;
+- semantic intent routing for task commands, visual QA, general QA, social
+  dialogue, and clarification;
+- read-only retrieval from an existing Chroma semantic-memory database;
+- modular, manifest-driven prompt composition;
+- real Qwen3-VL and fake VLM backends;
+- strict JSON validation, bounded repair attempts, and normalized command
+  publication;
+- TTS output and a Low System mock for end-to-end testing;
+- per-request artifacts and runtime metrics.
 
-Environment memory is currently read-only. A continuous memory-update loop for
-ingesting new observations, validating and deduplicating records, updating
-objects and relationships, generating embeddings, and upserting data into
-Chroma has not yet been implemented.
+Not implemented yet:
 
-Therefore, the current milestone proves the voice-to-command pipeline, but it
-does not yet represent a complete continuously learning cognitive system.
+- continuous memory updates from new observations;
+- reconciliation, invalidation, and deduplication of changing environment data;
+- a complete long-term dynamic context loop;
+- integration with the production Low System.
 
-## Workspace structure
+The current memory integration is read-only. It can retrieve existing semantic
+records but does not update the Chroma database.
 
-- `flzat_speech`: VAD, English STT, and TTS.
-- `flzat_vision_context`: camera buffering and `/vision/get_frame_near`.
-- `flzat_memory`: read-only access to an existing Chroma database through
-  `QueryMemory`.
-- `flzat_cognitive_pipeline`: safety guard, semantic intent router, manager,
-  RAG context, prompt composition, validation, and command generation.
-- `flzat_vlm`: Qwen3-VL server for cognitive inference.
-- `flzat_high_bringup`: the production launch file and test adapters/mocks.
+## Workspace layout
 
-There is one production manager, `cognitive_manager`, and five manifest-driven
-prompt profiles. `flzat_cognitive_v1` remains the task-command profile;
-visual QA, general QA, social dialogue, and clarification each have their own
-profile and strict output schema.
+```text
+flzat_high_system_ws/
+|-- demo_1/                         Ready-to-use demo Chroma/RAG database
+|-- images/                         Static images for repeatable VLM tests
+|-- models/                         Local Whisper and Silero VAD weights
+|-- src/
+|   |-- flzat_high_interfaces/      Custom ROS 2 messages, services and actions
+|   |-- flzat_speech/               VAD, English STT, TTS and speech ingress
+|   |-- flzat_vision_context/       Camera buffer and GetFrameNear service
+|   |-- flzat_memory/               Read-only Chroma/RAG retrieval
+|   |-- flzat_cognitive_pipeline/   Router, context, prompts and manager
+|   |-- flzat_vlm/                  Qwen3-VL action server
+|   `-- flzat_high_bringup/         Launch files, adapters and test mocks
+|-- tools/                          Standalone development and inspection tools
+|-- requirements.txt                Python dependencies
+`-- README.md
+```
 
-The routing boundary classifies `task_command`, `visual_qa`, `general_qa`,
-`social_dialogue`, and `clarification` with cached semantic embeddings. Safety
-commands bypass semantic inference and publish a high-level cancel request.
+The primary production entry point is:
 
-The Phase 2 per-request adaptive-context boundary is also active:
+```text
+src/flzat_high_bringup/launch/high_system.launch.py
+```
 
-- `task_command` uses the camera, environment RAG, trusted skill registry, and
-  safety policy;
-- `visual_qa` uses the camera without environment RAG;
-- `general_qa` is text-only;
-- `social_dialogue` uses bounded conversation history and a read-only user
-  profile;
-- `clarification` uses bounded dialogue/task history.
+## Important ROS 2 interfaces
 
-`ContextPolicy` reloads the trusted mode rules from YAML and canonicalizes the
-flags supplied by the router. Only `task_command` can reach the trusted command
-assembler and publish `/flzat/high_system/command`.
+| Interface | Type | Purpose |
+|---|---|---|
+| `/flzat/high_system/text_command` | Topic | Direct text input for testing |
+| `/flzat/high_system/command` | Topic | Validated JSON command for the Low System |
+| `/flzat/high_system/status` | Topic | High System state transitions |
+| `/vlm/raw_response` | Topic | Raw text returned by the VLM backend |
+| `/vlm/run` | Action | VLM inference request |
+| `/environment_memory/query` | Service | Read-only semantic-memory query |
+| `/vision/get_frame_near` | Service | Frame nearest to a request timestamp |
 
-This boundary selects and freezes context for one request. It must not be
-confused with dynamic context tracking or memory updates, which are outside the
-current implementation.
+Only actionable task commands are published to
+`/flzat/high_system/command`. Visual QA, general QA, social dialogue, and
+clarification normally produce a user-facing response instead of a Low System
+command.
 
-The Phase 3 output boundary is active:
+## Supported environment
 
-- `PromptComposer` selects and validates the manifest for the routed mode;
-- mode-specific validators reject cross-mode JSON, unknown skills, and
-  model-generated coordinates;
-- an invalid model response may be repaired at most twice using the same
-  Qwen backend, frozen frame, and context snapshot;
-- each request stores transcript/router/context/prompt/VLM/validator artifacts
-  under `<output_root>/<run_id>/<task_id>/<request_id>/`.
+The primary development environment is:
 
-## Install dependencies and build
+- Ubuntu 24.04;
+- ROS 2 Jazzy;
+- Python 3.12 in a Conda environment named `py312`;
+- an NVIDIA CUDA GPU for real Qwen3-VL inference.
+
+The architecture can run without a camera and microphone by using direct text
+input and a static image. Fake speech and fake VLM backends are also available
+for CPU-only integration tests.
+
+## Installation
+
+### 1. Install system packages
 
 ```bash
-conda activate py312
-source /opt/ros/jazzy/setup.bash
-cd /home/phucnv/Documents/JTR/High_system/flzat_high_system_ws
-
-pip install -r requirements.txt
-python -m pip check
-colcon build --symlink-install
-source install/setup.bash
+sudo apt update
+sudo apt install -y \
+  git \
+  git-lfs \
+  python3-rosdep \
+  python3-colcon-common-extensions \
+  ffmpeg \
+  espeak-ng \
+  libsndfile1 \
+  portaudio19-dev \
+  libgl1
 ```
 
-Run `colcon` after activating `py312`. The generated ROS Python executables
-must point to the Conda interpreter so they can import `chromadb`, PyTorch, and
-the pinned model dependencies.
+Initialize Git LFS and download the tracked model files:
 
-Full voice mode uses these runtime model files stored directly in this
-workspace; `models/` is a real directory and does not link to an older
-workspace:
+```bash
+git lfs install
+git lfs pull
+```
+
+The following local model files are required for the full voice pipeline:
 
 ```text
 models/tiny.pt
 models/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit
 ```
 
-Only the two weights required at runtime are kept here. Qwen3-VL and the
-sentence-transformer model remain managed through their model cache according
-to the configured model IDs.
+Qwen3-VL and the sentence-transformer model are downloaded into the Hugging
+Face cache on first use unless they are already cached.
 
-`environment_id` and `map_id` are intentionally required launch arguments;
-there is no silent fallback to an arbitrary or newest database.
+### 2. Create the Python environment
 
-## Local test without Qwen, a camera, or a microphone
+Create the environment once:
+
+```bash
+conda create -n py312 python=3.12 -y
+```
+
+Activate it before installing, building, or running the workspace:
+
+```bash
+conda activate py312
+source /opt/ros/jazzy/setup.bash
+```
+
+For an NVIDIA machine, install the PyTorch and TorchVision wheels appropriate
+for its CUDA driver first. Then install the repository dependencies:
+
+```bash
+cd <path-to-repository>/flzat_high_system_ws
+
+python3 -m pip install --upgrade pip setuptools wheel
+python3 -m pip install -r requirements.txt
+python3 -m pip check
+```
+
+Do not independently upgrade `empy`. ROS 2 interface generation requires the
+pinned `empy==3.3.4` API; incompatible Empy versions can cause errors such as
+`module 'em' has no attribute 'BUFFERED_OPT'`.
+
+### 3. Install ROS dependencies
+
+`rosdep init` is required only once per machine:
+
+```bash
+sudo rosdep init
+rosdep update
+```
+
+Install package dependencies from the workspace root:
+
+```bash
+rosdep install \
+  --from-paths src \
+  --ignore-src \
+  -r -y \
+  --skip-keys ament_python
+```
+
+### 4. Build the workspace
+
+```bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+The Conda environment must be active while building. This ensures the generated
+ROS 2 Python executables use the interpreter containing PyTorch, ChromaDB, and
+the model dependencies.
+
+### 5. Run repository tests
+
+```bash
+colcon test
+colcon test-result --verbose
+```
+
+## Included test data
+
+The repository includes a ready-to-use semantic-memory database and a set of
+static test images. They allow a new user to install, build, and exercise the
+complete cognitive path without first generating a new environment memory.
+
+The included database has this layout:
+
+```text
+flzat_high_system_ws/
+|-- demo_1/
+|   |-- manifest.json
+|   |-- observations.jsonl
+|   |-- maps/
+|   `-- chroma/
+|       `-- chroma.sqlite3
+`-- images/
+    |-- image1.png
+    `-- ...
+```
+
+The bundled manifest defines:
+
+```text
+environment_id = demo_1
+map_id         = demo_1_test
+object_count   = 59
+```
+
+For this bundled database, `storage_root` is the workspace root because the
+`demo_1` environment directory is located directly inside it.
+
+An external production database may still be used. A complete environment
+directory must contain a completed manifest, observations, map data, and its
+Chroma database. When using external data, the launch parameters must satisfy
+these rules:
+
+- `storage_root` is the parent directory containing the environment directory;
+- `environment_id` is the environment directory name;
+- `map_id` matches the completed map recorded in `manifest.json`.
+
+There is no automatic fallback to the newest database. Both `environment_id`
+and `map_id` are required intentionally.
+
+## Portable path configuration
+
+The commands below do not contain a username or a machine-specific home path.
+Enter the workspace and define the paths once in each new terminal session.
+The default values use the bundled `demo_1` database and `images/image1.png`:
+
+```bash
+cd <path-to-repository>/flzat_high_system_ws
+
+export FLZAT_WS="$(pwd)"
+export FLZAT_MEMORY_ROOT="${FLZAT_WS}"
+export FLZAT_OUTPUT_ROOT="${FLZAT_WS}/runtime_output"
+export FLZAT_TEST_IMAGE="${FLZAT_WS}/images/image1.png"
+```
+
+No path changes are required for the included test data. To use an external
+database or another image, override only `FLZAT_MEMORY_ROOT` or
+`FLZAT_TEST_IMAGE`. After this step, all launch commands use the same portable
+variables.
+
+Every new terminal that uses this workspace must also run:
+
+```bash
+conda activate py312
+source /opt/ros/jazzy/setup.bash
+source "${FLZAT_WS}/install/setup.bash"
+```
+
+## Run the full pipeline
+
+This mode starts the real microphone input, VAD, English STT, camera, RAG
+retrieval, Qwen3-VL, output validation, and TTS. It assumes camera index `0`
+and the default audio devices are available.
 
 ```bash
 ros2 launch flzat_high_bringup high_system.launch.py \
-  storage_root:=/home/phucnv/Documents/JTR/High_system \
+  storage_root:="$FLZAT_MEMORY_ROOT" \
   environment_id:=demo_1 \
   map_id:=demo_1_test \
+  output_root:="$FLZAT_OUTPUT_ROOT" \
+  embedding_backend:=sentence_transformer \
+  enable_text_command:=false \
+  use_fake_speech:=false \
+  use_fake_vlm:=false \
+  use_low_mock:=true \
+  run_camera_node:=true \
+  run_vad_node:=true \
+  run_stt_node:=true \
+  run_tts_node:=true \
+  frame_source:=camera \
+  model_id:=Qwen/Qwen3-VL-2B-Instruct \
+  device:=cuda \
+  dtype:=bfloat16 \
+  quantization:=none \
+  max_new_tokens:=256
+```
+
+Use `use_low_mock:=true` while the production Low System is not connected.
+Change it to `false` when a real Low System subscribes to the command topic and
+publishes its own execution status.
+
+## Inspect the final command JSON
+
+Start the JSON viewer before speaking or publishing a command:
+
+```bash
+cd "$FLZAT_WS"
+python3 tools/pretty_command_listener.py
+```
+
+It subscribes to `/flzat/high_system/command` and prints each final command as
+indented JSON. A typical message is:
+
+```json
+{
+  "schema_version": "flzat.high_command.v2",
+  "task_id": "task-0001",
+  "request_id": "task-0001-r01",
+  "command_id": "task-0001-c01",
+  "intent": "fetch_object",
+  "target": {
+    "type": "environment_object",
+    "name": "book",
+    "memory_id": "83c7998a-f665-48b3-ba1a-1fb9ae80222f"
+  },
+  "trusted_context": {
+    "environment_id": "demo_1",
+    "map_id": "demo_1_test",
+    "room": "indoor_environment",
+    "position": {
+      "frame_id": "map",
+      "x": 9.966,
+      "y": -0.642,
+      "z": 0.595
+    }
+  },
+  "execution_mode": "direct",
+  "missing_information": [],
+  "status": "validated"
+}
+```
+
+To inspect the model response before command assembly, use:
+
+```bash
+ros2 topic echo --full-length /vlm/raw_response std_msgs/msg/String
+```
+
+The raw VLM response and the final High System command are intentionally
+different. The Cognitive Manager validates the model response and enriches the
+final command with trusted coordinates and metadata retrieved from memory.
+
+## Test without VAD and STT
+
+This mode disables microphone capture, VAD, and STT. A text command enters the
+same Intent Router, RAG, prompt, Qwen3-VL, validation, and command-publication
+path as an STT transcript. The live camera and TTS remain enabled.
+
+```bash
+ros2 launch flzat_high_bringup high_system.launch.py \
+  storage_root:="$FLZAT_MEMORY_ROOT" \
+  environment_id:=demo_1 \
+  map_id:=demo_1_test \
+  output_root:="$FLZAT_OUTPUT_ROOT" \
+  embedding_backend:=sentence_transformer \
+  enable_text_command:=true \
+  use_fake_speech:=false \
+  use_fake_vlm:=false \
+  use_low_mock:=true \
+  run_camera_node:=true \
+  run_vad_node:=false \
+  run_stt_node:=false \
+  run_tts_node:=true \
+  frame_source:=camera \
+  model_id:=Qwen/Qwen3-VL-2B-Instruct \
+  device:=cuda \
+  dtype:=bfloat16 \
+  quantization:=none \
+  max_new_tokens:=256
+```
+
+Publish a user command from another sourced terminal:
+
+```bash
+ros2 topic pub --once \
+  /flzat/high_system/text_command \
+  std_msgs/msg/String \
+  "{data: 'get the book on the table'}"
+```
+
+Other examples:
+
+```bash
+ros2 topic pub --once /flzat/high_system/text_command \
+  std_msgs/msg/String "{data: 'go to the bedroom'}"
+
+ros2 topic pub --once /flzat/high_system/text_command \
+  std_msgs/msg/String "{data: 'stop'}"
+
+ros2 topic pub --once /flzat/high_system/text_command \
+  std_msgs/msg/String "{data: 'what can you see in front of you'}"
+```
+
+The visual-QA example produces a user-facing response and normally does not
+publish a Low System command.
+
+## Test on a cloud machine with a static image
+
+This mode is useful when the machine has a GPU but no camera, microphone, or
+speaker. It still exercises RAG retrieval, prompt composition, real Qwen3-VL,
+validation, and output processing.
+
+```bash
+ros2 launch flzat_high_bringup high_system.launch.py \
+  storage_root:="$FLZAT_MEMORY_ROOT" \
+  environment_id:=demo_1 \
+  map_id:=demo_1_test \
+  output_root:="$FLZAT_OUTPUT_ROOT" \
+  embedding_backend:=sentence_transformer \
+  enable_text_command:=true \
+  use_fake_speech:=false \
+  use_fake_vlm:=false \
+  use_low_mock:=true \
+  run_camera_node:=false \
+  run_vad_node:=false \
+  run_stt_node:=false \
+  run_tts_node:=false \
+  frame_source:=static \
+  static_image_path:="$FLZAT_TEST_IMAGE" \
+  model_id:=Qwen/Qwen3-VL-2B-Instruct \
+  device:=cuda \
+  dtype:=bfloat16 \
+  quantization:=none \
+  max_new_tokens:=256
+```
+
+Send commands through `/flzat/high_system/text_command` and monitor the final
+JSON with `tools/pretty_command_listener.py`.
+
+## CPU-only integration test with fake backends
+
+This verifies ROS 2 routing and orchestration without loading Qwen3-VL or
+accessing camera and audio hardware:
+
+```bash
+ros2 launch flzat_high_bringup high_system.launch.py \
+  storage_root:="$FLZAT_MEMORY_ROOT" \
+  environment_id:=demo_1 \
+  map_id:=demo_1_test \
+  output_root:="$FLZAT_OUTPUT_ROOT" \
   embedding_backend:=deterministic_test \
   enable_text_command:=true \
   use_fake_speech:=true \
   use_fake_vlm:=true \
   use_low_mock:=true \
-  frame_source:=static
-```
-
-Send a command from another terminal:
-
-```bash
-ros2 topic pub --once /flzat/high_system/text_command \
-  std_msgs/msg/String "{data: 'get the book on the table'}"
-```
-
-## Test the full pipeline with an existing image
-
-This runs the standard ROS 2 pipeline. The static frame server replaces only
-the camera; it does not bypass RAG, the Cognitive Manager, PromptComposer, or
-output processing.
-
-```bash
-ros2 launch flzat_high_bringup high_system.launch.py \
-  storage_root:=/path/to/flzat_memory_data \
-  environment_id:=demo_1 \
-  map_id:=demo_1_test \
-  enable_text_command:=true \
-  use_fake_speech:=true \
-  use_fake_vlm:=false \
-  use_low_mock:=true \
+  run_camera_node:=false \
   frame_source:=static \
-  static_image_path:=/path/to/image.png \
-  model_id:=Qwen/Qwen3-VL-2B-Instruct \
-  device:=cuda \
-  dtype:=bfloat16
+  static_image_path:="$FLZAT_TEST_IMAGE"
 ```
 
-Copy this workspace and the database directory to the GPU/cloud machine, then
-run the same ROS 2 commands. There is no separate cloud pipeline or dependency
-file.
+## Runtime artifacts
 
-## Test the VLM server with an image and prompt
+Each request writes diagnostic artifacts below:
 
-This command tests only the model server; it does not test RAG or the cognitive
-pipeline:
-
-```bash
-ros2 launch flzat_vlm vlm_server.launch.py \
-  model_id:=Qwen/Qwen3-VL-2B-Instruct device:=cuda dtype:=bfloat16
-
-ros2 run flzat_vlm vlm_test_client \
-  --image /path/to/image.png \
-  --prompt "Describe the objects visible in this image."
+```text
+<output_root>/<run_id>/<task_id>/<request_id>/
 ```
 
-## Production
-
-```bash
-ros2 launch flzat_high_bringup high_system.launch.py \
-  storage_root:=$HOME/.local/share/flzat/environment_memory \
-  environment_id:=hotel_demo_14 \
-  map_id:=<MAP_ID> \
-  model_id:=Qwen/Qwen3-VL-2B-Instruct
-```
-
-The Low System subscribes to `/flzat/high_system/command`, publishes
-`/flzat/low_system/status`, and receives `/flzat/low_system/cancel`.
-
-Runtime IDs use readable formats such as `run-20261014T153000Z`, `task-0001`,
-`task-0001-r01`, and `task-0001-c01`. Artifacts are stored per run so sequence
-numbers never overwrite data from a previous process invocation.
-
-`qwen3_vl` is the only production VLM backend. `audio_loopback` and
-`acceptance_client` are test tools that use the same production ROS contracts.
-
-See `docs/ARCHITECTURE.md`, `docs/INTERFACES.md`, and `docs/TEST_REPORT.md`.
+The artifacts include the transcript, routed intent, selected context, composed
+prompt, raw VLM response, validation result, and final command when applicable.
+They are intended for debugging and evaluation and should not be committed to
+Git.

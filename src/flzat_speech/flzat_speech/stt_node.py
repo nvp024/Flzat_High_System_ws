@@ -165,7 +165,7 @@ class SttNode(Node):
 
             feedback_msg.status = "inference_complete"
             goal_handle.publish_feedback(feedback_msg)
-            self.get_logger().info(f"📝 Transcript: '{transcript}'")
+            self.get_logger().info(f"[STT] '{transcript}'")
             goal_handle.succeed()
             result = SpeechToText.Result()
             result.transcript = transcript

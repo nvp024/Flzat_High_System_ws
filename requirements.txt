@@ -1,17 +1,40 @@
-# Python dependencies shared by ROS 2 runtime and remote GPU test machines.
-# Install these into the same Python environment that runs the ROS nodes.
-torch>=2.6
+# Python dependencies shared by ROS 2 runtime and remote GPU machines.
+# Install these into the same Python environment that builds and runs the ROS
+# nodes. For NVIDIA hosts, install the matching CUDA torch/torchvision wheels
+# first; the constraints below will keep that compatible installation.
+
+# ROS 2 Python build compatibility. ROS 2 Humble/Jazzy rosidl templates require
+# the Empy 3 API; Empy 4 causes errors such as missing em.BUFFERED_OPT.
+empy==3.3.4
+lark>=1.1,<2.0
+catkin-pkg>=1.0,<2.0
+
+# Numeric, vision and model runtime.
+torch>=2.6,<3.0
+torchvision>=0.21,<1.0
 numpy>=1.26,<3.0
+scipy>=1.11,<2.0
+scikit-learn>=1.4,<2.0
 transformers==4.57.3
 huggingface-hub>=0.34.0,<1.0
-accelerate>=1.0
-qwen-vl-utils>=0.0.14
-Pillow>=10.0
+accelerate>=1.0,<2.0
+qwen-vl-utils==0.0.14
+Pillow>=10.0,<13.0
 opencv-python>=4.8,<5.0
-openai-whisper>=20240930
-sounddevice>=0.4
-pyttsx3>=2.90
-typeguard>=4.0
+
+# Speech runtime.
+openai-whisper==20250625
+more-itertools>=10.0,<12.0
+sounddevice>=0.4,<1.0
+pyttsx3>=2.90,<3.0
+
+# RAG, configuration and validation.
+typeguard>=4.0,<5.0
 chromadb==1.5.9
-sentence-transformers>=3.0,<6.0
-PyYAML>=6.0
+sentence-transformers==5.7.0
+PyYAML>=6.0,<7.0
+requests>=2.31,<3.0
+
+# Repository test runner. Keep pytest below 9 for ROS launch_testing plugins;
+# ROS lint plugins remain managed by rosdep/apt.
+pytest>=8.0,<9.0

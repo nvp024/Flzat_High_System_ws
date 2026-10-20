@@ -1,0 +1,11 @@
+{
+  "created_at_utc": "2026-09-21T09:41:39.445853+00:00",
+  "database_path": "chroma",
+  "environment_id": "demo_1",
+  "map_checksum": "d9adcea26dc9c9b03684c229fe26a2d1ed20232345d8c7f2e86fa0b5eeae2cb8",
+  "map_id": "demo_1_test",
+  "map_yaml": "maps/demo_1.yaml",
+  "object_count": 59,
+  "schema_version": "environment_memory.manifest.v1",
+  "status": "complete"
+}

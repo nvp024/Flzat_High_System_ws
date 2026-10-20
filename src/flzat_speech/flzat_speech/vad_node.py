@@ -290,11 +290,11 @@ class VadNode(Node):
     def _on_tts_active(self, msg: Bool) -> None:
         if msg.data and not self._tts_active:
             self._vad_stream.reset()
-            self.get_logger().info("TTS active — VAD paused to prevent speaker feedback.")
+            self.get_logger().debug("TTS active — VAD paused to prevent speaker feedback.")
         elif not msg.data and self._tts_active:
             self._vad_stream.reset()
             self._resume_vad_at = time.monotonic() + self._tts_resume_delay_s
-            self.get_logger().info(
+            self.get_logger().debug(
                 f"TTS inactive — VAD resumes after "
                 f"{self._tts_resume_delay_s:.2f} s cooldown."
             )
@@ -344,7 +344,7 @@ class VadNode(Node):
         msg.sample_rate = SAMPLE_RATE
 
         self._pub.publish(msg)
-        self.get_logger().info(
+        self.get_logger().debug(
             f"⏹️  Published segment — {len(audio_i16) / SAMPLE_RATE * 1000:.0f} ms → transcribing …"
         )
 

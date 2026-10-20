@@ -157,7 +157,7 @@ class TtsNode(Node):
                 return GoalResponse.REJECT
             self._goal_reserved = True
 
-        self.get_logger().info(f"TTS goal accepted: '{text[:60]}'")
+        self.get_logger().debug(f"TTS goal accepted: '{text[:60]}'")
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle) -> CancelResponse:
@@ -182,7 +182,7 @@ class TtsNode(Node):
     def _execute_callback(self, goal_handle):
         text = goal_handle.request.text.strip()
         token = object()
-        self.get_logger().info(f"TTS executing: '{text}'")
+        self.get_logger().info(f"[TTS] '{text}'")
 
         self._stop_event.clear()
         with self._state_lock:
@@ -259,7 +259,7 @@ class TtsNode(Node):
             goal_handle.abort()
             result.success = False
         else:
-            self.get_logger().info("TTS goal completed.")
+            self.get_logger().debug("TTS goal completed.")
             goal_handle.succeed()
             result.success = True
         return result
