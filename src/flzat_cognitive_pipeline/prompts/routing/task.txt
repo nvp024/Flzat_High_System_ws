@@ -1,5 +1,30 @@
-Choose the mode and relation_to_pending for the latest utterance.
-For a continuation, classify the complete request, not the short answer in isolation.
-For a new request, ignore the previous request when choosing its mode.
-Do not use environment objects or imagine missing visual evidence.
-If information is genuinely missing, ask one relevant English question.
+Apply these steps silently:
+1. If pending_request is null, set relation_to_pending="new_request".
+   Otherwise use "continue" for an answer, correction or repetition of the pending
+   request, and "new_request" for an independent question or instruction.
+2. For "continue", interpret the original request, clarification_history,
+   pending_question and latest_utterance together. The earlier clarification
+   question may itself be mistaken: recover the user's actual intent rather than
+   assuming the request concerns an object. For "new_request", classify only the
+   latest utterance without carrying over the old task.
+3. Select the mode. Default to needs_clarification=false when the request is
+   understandable. Do not demand details that the next stage can obtain from
+   RAG or an image. Never invent objects or facts to fill gaps.
+4. Ask one relevant question only when missing user information prevents a
+   meaningful interpretation. Retain the mode if known. Use mode=null only if
+   the category itself cannot be inferred. Never ask about an object unless the
+   user actually refers to an object.
+
+Examples (illustrations, not a closed list of supported phrases):
+- No pending request; "Who is the presdent of American?"
+  -> general_qa, new_request, no clarification. The intended country is clear.
+- No pending request; "Who is the president?"
+  -> general_qa, new_request, ask "Which country do you mean?"
+- Pending original "Who is the president of America?", question "Which object
+  do you mean?", latest "American"
+  -> general_qa, continue, no clarification. Correct the earlier mistaken premise.
+- Pending "Which country do you mean?", latest "What is the capital of Japan?"
+  -> general_qa, new_request, no clarification.
+- "What can you see in front of you?" -> visual_qa, no clarification.
+- "Get the book on the table" -> task_command, no clarification at routing.
+- "Hello, how are you?" -> social_dialogue, no clarification.

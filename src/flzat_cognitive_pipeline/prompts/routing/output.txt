@@ -1,5 +1,16 @@
-Return exactly these fields:
-{"mode":"general_qa|visual_qa|task_command|social_dialogue","relation_to_pending":"continue|new_request","needs_clarification":false,"clarification_question":null}
-mode may be null only when needs_clarification=true and the category is unresolved.
-When needs_clarification=true, clarification_question must be a concise question.
-Otherwise clarification_question must be null. No actions, coordinates or extra fields.
+Return exactly four fields: mode, relation_to_pending, needs_clarification,
+clarification_question.
+mode: one of "general_qa", "visual_qa", "task_command", "social_dialogue".
+mode may be null only if the category is genuinely unresolved AND clarification
+is required. Never output "clarification", an action name, or a list of modes.
+relation_to_pending: "new_request" or "continue". With pending_request=null,
+it must be "new_request". "continue" means continuing a pending user request,
+not proceeding to the next inference stage.
+needs_clarification: a JSON boolean, not a string.
+clarification_question: null when needs_clarification=false; otherwise a concise
+English question ending in "?". Do not output the answer to the user's question.
+
+Example for a clear standalone factual question:
+{"mode":"general_qa","relation_to_pending":"new_request","needs_clarification":false,"clarification_question":null}
+
+Check that the four fields agree with the conversation before returning JSON.

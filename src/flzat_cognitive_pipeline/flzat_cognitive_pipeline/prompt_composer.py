@@ -171,7 +171,7 @@ class PromptComposer:
         )
         return ComposedPrompt(
             system_prompt=system, user_prompt=user, profile="flzat_routing_v1",
-            version="1.0.0", mode="routing", output_schema="SemanticRoute.v1",
+            version="1.1.0", mode="routing", output_schema="SemanticRoute.v1",
             validator="semantic_route_v1",
             prompt_hash=hashlib.sha256((system + "\0" + user).encode()).hexdigest(),
             sections=("routing/system.txt", "routing/task.txt", "routing/output.txt"),

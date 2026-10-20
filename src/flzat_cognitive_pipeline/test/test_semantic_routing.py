@@ -220,7 +220,6 @@ def test_task_answer_only_enables_rag_after_explicit_routing(manager):
     '{"mode":"task_command"}',
     route(mode="clarification"),
     route(mode=None),
-    route(relation="continue"),
     route(question="Which country"),  # missing question mark
 ])
 def test_bad_route_rejected_without_main_inference_or_dispatch(manager, raw):
@@ -286,6 +285,30 @@ def test_null_mode_supported_only_for_genuine_clarification():
     )
     assert decision.mode is None
     assert decision.needs_clarification
+
+
+def test_no_pending_task_normalizes_continue_and_preserves_general_qa(manager):
+    send(manager, "who is the presdent of American")
+    manager._vlm_client.finish(route(relation="continue"))
+    main = runtime_input(manager._vlm_client.calls[-1].goal)
+    assert main["router_mode"] == "general_qa"
+    assert main["english_transcript"] == "who is the presdent of American"
+    assert "dialogue_history" not in main
+    assert manager._active.task.task_id == "task-0001"
+    manager._query_memory.assert_not_called()
+    manager._obtain_frame.assert_not_called()
+    manager._vlm_client.finish(ANSWER)
+    manager._publish_command.assert_not_called()
+
+
+def test_normalization_does_not_allow_invalid_mode_or_relation():
+    with pytest.raises(ValueError):
+        parse_semantic_route(route(mode="invalid", relation="continue"), has_pending=False)
+    with pytest.raises(ValueError):
+        parse_semantic_route(route(relation="invalid"), has_pending=False)
+    assert parse_semantic_route(
+        route(relation="continue"), has_pending=True,
+    ).relation_to_pending == "continue"
 
 
 def test_main_output_cannot_turn_general_question_into_action(manager):

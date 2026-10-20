@@ -71,7 +71,8 @@ Output phân loại có đúng bốn field:
 ```
 
 `mode` thuộc general_qa/visual_qa/task_command/social_dialogue; null chỉ được
-phép khi cần hỏi lại. `continue` chỉ hợp lệ nếu có task chờ clarification;
+phép khi cần hỏi lại. `continue` chỉ được dùng nếu có task chờ clarification;
+nếu không có task chờ, Manager chuẩn hóa thành `new_request` theo trạng thái thực;
 `new_request` tạo task mới khi người dùng đổi chủ đề. Output này không phải
 High Command và không được gửi xuống Low System. Sau khi phân loại hợp lệ,
 Manager lấy context theo mode và gọi inference chính với các schema bên dưới.

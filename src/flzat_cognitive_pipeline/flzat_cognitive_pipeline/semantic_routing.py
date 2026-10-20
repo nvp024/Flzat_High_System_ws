@@ -32,8 +32,10 @@ def parse_semantic_route(raw: str, *, has_pending: bool) -> SemanticRoute:
     relation = value["relation_to_pending"]
     if not isinstance(relation, str) or relation not in {"continue", "new_request"}:
         raise ValueError("invalid relation_to_pending")
-    if relation == "continue" and not has_pending:
-        raise ValueError("cannot continue without a pending clarification")
+    # Conversation existence is authoritative application state. With no
+    # pending task there is nothing to continue, regardless of model wording.
+    if not has_pending:
+        relation = "new_request"
     clarify = value["needs_clarification"]
     if not isinstance(clarify, bool):
         raise ValueError("needs_clarification must be boolean")

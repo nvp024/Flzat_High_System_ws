@@ -64,6 +64,9 @@ The routing call selects `general_qa`, `visual_qa`, `task_command`, or
 question only if information is actually missing. An unresolved category may be
 `null` while asking for clarification. There is no automatic
 `clarification -> task_command` conversion.
+When there is no pending task, Manager normalizes the relationship to
+`new_request` even if the model returns `continue`. This does not change the
+selected mode or relax validation of other routing fields.
 
 For a continuation, the main inference receives the original transcript and
 question/answer history with the resolved mode's specialized prompt. An
