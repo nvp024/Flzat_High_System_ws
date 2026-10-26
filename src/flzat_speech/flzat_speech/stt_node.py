@@ -15,6 +15,13 @@ from flzat_high_interfaces.action import SpeechToText
 from flzat_high_interfaces.msg import SpeechAudio
 
 EXPECTED_SAMPLE_RATE: int = 16_000
+DEFAULT_WHISPER_MODEL: str = "base.en.pt"
+DEFAULT_BEAM_SIZE: int = 5
+DEFAULT_MAX_NO_SPEECH_PROBABILITY: float = 0.65
+DEFAULT_MIN_AVG_LOGPROB: float = -1.0
+MAX_COMPRESSION_RATIO: float = 2.4
+MAX_WORDS_PER_SECOND: float = 5.0
+MAX_DECODE_TOKENS: int = 64
 
 
 def _default_whisper_model_path() -> str:
@@ -26,15 +33,72 @@ def _default_whisper_model_path() -> str:
         # <workspace>/install/<package> as an environment prefix.
         for models_dir in (prefix / "models", prefix.parent / "models"):
             if models_dir.is_dir():
-                return str(models_dir / "tiny.pt")
+                return str(models_dir / DEFAULT_WHISPER_MODEL)
         if prefix.parent.name == "install":
             models_dir = prefix.parent.parent / "models"
             if models_dir.is_dir():
-                return str(models_dir / "tiny.pt")
+                return str(models_dir / DEFAULT_WHISPER_MODEL)
 
     # This also works with --symlink-install because resolve() reaches src/.
     models_dir = Path(__file__).resolve().parents[3] / "models"
-    return str(models_dir / "tiny.pt")
+    return str(models_dir / DEFAULT_WHISPER_MODEL)
+
+
+def _build_transcribe_options(
+    language: str | None,
+    beam_size: int,
+    initial_prompt: str,
+) -> dict[str, object]:
+    """Build deterministic decoding options for independent robot commands."""
+    options: dict[str, object] = {
+        "task": "transcribe",
+        "fp16": False,
+        "temperature": 0.0,
+        "beam_size": beam_size,
+        "condition_on_previous_text": False,
+        "sample_len": MAX_DECODE_TOKENS,
+        "verbose": None,
+    }
+    if language is not None:
+        options["language"] = language
+    if initial_prompt:
+        options["initial_prompt"] = initial_prompt
+    return options
+
+
+def _extract_confident_transcript(
+    result_data: dict,
+    max_no_speech_probability: float,
+    min_avg_logprob: float,
+    audio_duration_s: float,
+) -> str:
+    """Keep only Whisper segments that contain sufficiently confident speech."""
+    segments = result_data.get("segments")
+    if not isinstance(segments, list):
+        return str(result_data.get("text", "")).strip()
+
+    accepted: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        no_speech_probability = float(segment.get("no_speech_prob", 0.0))
+        average_log_probability = float(segment.get("avg_logprob", 0.0))
+        compression_ratio = float(segment.get("compression_ratio", 0.0))
+        if no_speech_probability > max_no_speech_probability:
+            continue
+        if average_log_probability < min_avg_logprob:
+            continue
+        if compression_ratio > MAX_COMPRESSION_RATIO:
+            continue
+        text = str(segment.get("text", "")).strip()
+        if text:
+            accepted.append(text)
+    transcript = " ".join(accepted)
+    if audio_duration_s > 0.0:
+        words_per_second = len(transcript.split()) / audio_duration_s
+        if words_per_second > MAX_WORDS_PER_SECOND:
+            return ""
+    return transcript
 
 
 def _load_stt_model(model_path: str):
@@ -60,11 +124,35 @@ class SttNode(Node):
         self.get_logger().info("Loading Whisper model …")
         self.declare_parameter("whisper_model_path", _default_whisper_model_path())
         self.declare_parameter("language", "en")
+        self.declare_parameter("beam_size", DEFAULT_BEAM_SIZE)
+        self.declare_parameter("initial_prompt", "")
+        self.declare_parameter(
+            "max_no_speech_probability",
+            DEFAULT_MAX_NO_SPEECH_PROBABILITY,
+        )
+        self.declare_parameter("min_avg_logprob", DEFAULT_MIN_AVG_LOGPROB)
         self.declare_parameter("expected_sample_rate", EXPECTED_SAMPLE_RATE)
         self.declare_parameter("max_audio_duration_s", 30.0)
-        model_path = self.get_parameter("whisper_model_path").get_parameter_value().string_value
+        model_path = (
+            self.get_parameter("whisper_model_path")
+            .get_parameter_value()
+            .string_value.strip()
+            or _default_whisper_model_path()
+        )
         language = self.get_parameter("language").get_parameter_value().string_value.strip()
         self._language = language or None
+        self._beam_size = self.get_parameter(
+            "beam_size"
+        ).get_parameter_value().integer_value
+        self._initial_prompt = self.get_parameter(
+            "initial_prompt"
+        ).get_parameter_value().string_value.strip()
+        self._max_no_speech_probability = self.get_parameter(
+            "max_no_speech_probability"
+        ).get_parameter_value().double_value
+        self._min_avg_logprob = self.get_parameter(
+            "min_avg_logprob"
+        ).get_parameter_value().double_value
         self._expected_sample_rate = self.get_parameter(
             "expected_sample_rate"
         ).get_parameter_value().integer_value
@@ -78,10 +166,17 @@ class SttNode(Node):
             )
         if self._max_audio_duration_s <= 0.0:
             raise ValueError("Parameter 'max_audio_duration_s' must be greater than zero.")
+        if self._beam_size < 1:
+            raise ValueError("Parameter 'beam_size' must be at least 1.")
+        if not 0.0 <= self._max_no_speech_probability <= 1.0:
+            raise ValueError(
+                "Parameter 'max_no_speech_probability' must be between 0.0 and 1.0."
+            )
         self.get_logger().info(f"Whisper model path: {model_path}")
         self._stt_model = _load_stt_model(model_path)
         self.get_logger().info(
-            f"Whisper model ready; language={self._language or 'auto'}."
+            f"Whisper model ready; language={self._language or 'auto'}; "
+            f"beam_size={self._beam_size}; deterministic decoding enabled."
         )
 
         self._action_server = ActionServer(
@@ -148,11 +243,22 @@ class SttNode(Node):
             feedback_msg.status = "inference_started"
             goal_handle.publish_feedback(feedback_msg)
 
-            transcribe_options: dict[str, object] = {"fp16": False}
-            if self._language is not None:
-                transcribe_options["language"] = self._language
+            transcribe_options = _build_transcribe_options(
+                self._language,
+                self._beam_size,
+                self._initial_prompt,
+            )
             result_data = self._stt_model.transcribe(audio_f32, **transcribe_options)
-            transcript = result_data["text"].strip()
+            transcript = _extract_confident_transcript(
+                result_data,
+                self._max_no_speech_probability,
+                self._min_avg_logprob,
+                len(audio_f32) / self._expected_sample_rate,
+            )
+            if not transcript:
+                self.get_logger().warn(
+                    "Whisper result rejected: no sufficiently confident speech."
+                )
 
             # Whisper cannot be safely interrupted mid-inference. The action is
             # nevertheless marked cancelled as soon as that inference returns.

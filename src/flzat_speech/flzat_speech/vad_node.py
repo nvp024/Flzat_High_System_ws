@@ -27,7 +27,7 @@ PRE_ROLL_MS: float   = 200
 DEFAULT_MIC_DEVICE: str = "sysdefault"
 DEFAULT_TTS_ACTIVE_TOPIC: str = "/voice/tts_active"
 DEFAULT_MAX_SEGMENT_DURATION_S: float = 30.0
-DEFAULT_TTS_RESUME_DELAY_S: float = 0.3
+DEFAULT_TTS_RESUME_DELAY_S: float = 0.8
 
 
 def _default_silero_jit_path() -> str:

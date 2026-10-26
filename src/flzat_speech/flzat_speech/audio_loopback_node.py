@@ -23,7 +23,6 @@ class AudioLoopbackNode(Node):
         self._cb_group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
         self._active = False
-        self._pending_audio: Optional[SpeechAudio] = None
         self._audio_sub = self.create_subscription(
             SpeechAudio,
             "/audio_events",
@@ -48,9 +47,8 @@ class AudioLoopbackNode(Node):
     def _on_audio(self, audio: SpeechAudio) -> None:
         with self._lock:
             if self._active:
-                self._pending_audio = audio
                 self.get_logger().warn(
-                    "Audio pipeline busy — retained only the newest speech segment."
+                    "Audio pipeline busy — dropped the new speech segment."
                 )
                 return
             self._active = True
@@ -144,12 +142,7 @@ class AudioLoopbackNode(Node):
 
     def _complete(self) -> None:
         with self._lock:
-            audio = self._pending_audio
-            self._pending_audio = None
-            if audio is None:
-                self._active = False
-        if audio is not None:
-            self._send_stt(audio)
+            self._active = False
 
     def destroy_node(self) -> None:
         self._stt_client.destroy()

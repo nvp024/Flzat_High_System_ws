@@ -41,8 +41,14 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("mic_device", default_value="sysdefault"),
         DeclareLaunchArgument("vad_silence_ms", default_value="500"),
-        DeclareLaunchArgument("tts_rate", default_value="175"),
         DeclareLaunchArgument("tts_volume", default_value="1.0"),
+        DeclareLaunchArgument("piper_model_path", default_value=""),
+        DeclareLaunchArgument("piper_config_path", default_value=""),
+        DeclareLaunchArgument("piper_length_scale", default_value="1.0"),
+        DeclareLaunchArgument("piper_use_cuda", default_value="false"),
+        DeclareLaunchArgument("tts_output_sample_rate", default_value="48000"),
+        DeclareLaunchArgument("tts_sentence_pause_ms", default_value="200"),
+        DeclareLaunchArgument("tts_max_chunk_characters", default_value="240"),
         vision,
         Node(
             package="flzat_speech",
@@ -66,11 +72,25 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(LaunchConfiguration("run_tts_node")),
             parameters=[{
-                "tts_rate": ParameterValue(
-                    LaunchConfiguration("tts_rate"), value_type=int
-                ),
                 "tts_volume": ParameterValue(
                     LaunchConfiguration("tts_volume"), value_type=float
+                ),
+                "piper_model_path": LaunchConfiguration("piper_model_path"),
+                "piper_config_path": LaunchConfiguration("piper_config_path"),
+                "piper_length_scale": ParameterValue(
+                    LaunchConfiguration("piper_length_scale"), value_type=float
+                ),
+                "piper_use_cuda": ParameterValue(
+                    LaunchConfiguration("piper_use_cuda"), value_type=bool
+                ),
+                "output_sample_rate": ParameterValue(
+                    LaunchConfiguration("tts_output_sample_rate"), value_type=int
+                ),
+                "sentence_pause_ms": ParameterValue(
+                    LaunchConfiguration("tts_sentence_pause_ms"), value_type=int
+                ),
+                "max_chunk_characters": ParameterValue(
+                    LaunchConfiguration("tts_max_chunk_characters"), value_type=int
                 ),
             }],
         ),

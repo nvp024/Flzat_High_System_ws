@@ -187,9 +187,27 @@ git lfs pull
 The following local model files are required for the full voice pipeline:
 
 ```text
-models/tiny.pt
+models/base.en.pt
 models/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit
+models/tts/en_US-lessac-medium.onnx
+models/tts/en_US-lessac-medium.onnx.json
 ```
+
+Download the default neural English voice after installing `requirements.txt`:
+
+```bash
+python3 -m piper.download_voices \
+  --download-dir models/tts \
+  en_US-lessac-medium
+```
+
+Download the default English Whisper checkpoint:
+
+```bash
+python3 -c "import whisper; whisper.load_model('base.en', download_root='models')"
+```
+
+The real TTS node uses Piper with the `en_US-lessac-medium` English voice.
 
 Qwen3-VL and the sentence-transformer model are downloaded into the Hugging
 Face cache on first use unless they are already cached.
@@ -354,6 +372,9 @@ ros2 launch flzat_high_bringup high_system.launch.py \
   run_vad_node:=true \
   run_stt_node:=true \
   run_tts_node:=true \
+  piper_model_path:="$FLZAT_WS/models/tts/en_US-lessac-medium.onnx" \
+  tts_output_sample_rate:=48000 \
+  tts_sentence_pause_ms:=200 \
   frame_source:=camera \
   model_id:=Qwen/Qwen3-VL-2B-Instruct \
   device:=cuda \
@@ -365,6 +386,23 @@ ros2 launch flzat_high_bringup high_system.launch.py \
 Use `use_low_mock:=true` while the production Low System is not connected.
 Change it to `false` when a real Low System subscribes to the command topic and
 publishes its own execution status.
+
+Test the Piper voice without running VAD, STT, RAG, or Qwen:
+
+```bash
+ros2 run flzat_speech tts_node --ros-args \
+  -p piper_model_path:="$FLZAT_WS/models/tts/en_US-lessac-medium.onnx" \
+  -p output_sample_rate:=48000
+```
+
+In another sourced terminal, send one English sentence:
+
+```bash
+ros2 action send_goal --feedback \
+  /tts_action \
+  flzat_high_interfaces/action/TextToSpeech \
+  "{text: 'Hello. I am FLZAT, your robotic assistant.'}"
+```
 
 ## Inspect the final command JSON
 
