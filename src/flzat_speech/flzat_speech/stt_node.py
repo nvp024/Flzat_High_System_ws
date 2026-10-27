@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import threading
 from pathlib import Path
@@ -8,8 +9,9 @@ import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 
 from flzat_high_interfaces.action import SpeechToText
 from flzat_high_interfaces.msg import SpeechAudio
@@ -48,6 +50,7 @@ def _build_transcribe_options(
     language: str | None,
     beam_size: int,
     initial_prompt: str,
+    max_decode_tokens: int = MAX_DECODE_TOKENS,
 ) -> dict[str, object]:
     """Build deterministic decoding options for independent robot commands."""
     options: dict[str, object] = {
@@ -56,7 +59,7 @@ def _build_transcribe_options(
         "temperature": 0.0,
         "beam_size": beam_size,
         "condition_on_previous_text": False,
-        "sample_len": MAX_DECODE_TOKENS,
+        "sample_len": max_decode_tokens,
         "verbose": None,
     }
     if language is not None:
@@ -72,33 +75,77 @@ def _extract_confident_transcript(
     min_avg_logprob: float,
     audio_duration_s: float,
 ) -> str:
-    """Keep only Whisper segments that contain sufficiently confident speech."""
+    """Validate the whole utterance; never remove words from a command."""
     segments = result_data.get("segments")
     if not isinstance(segments, list):
-        return str(result_data.get("text", "")).strip()
+        raise ValueError("missing Whisper segment metadata")
 
     accepted: list[str] = []
     for segment in segments:
         if not isinstance(segment, dict):
+            raise ValueError("invalid Whisper segment")
+        text = segment.get("text")
+        if not isinstance(text, str):
+            raise ValueError("invalid segment text")
+        if not text.strip():
             continue
-        no_speech_probability = float(segment.get("no_speech_prob", 0.0))
-        average_log_probability = float(segment.get("avg_logprob", 0.0))
-        compression_ratio = float(segment.get("compression_ratio", 0.0))
+        try:
+            no_speech_probability = float(segment["no_speech_prob"])
+            average_log_probability = float(segment["avg_logprob"])
+            compression_ratio = float(segment["compression_ratio"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("missing or invalid confidence metadata") from exc
+        if not all(math.isfinite(value) for value in (
+            no_speech_probability, average_log_probability, compression_ratio
+        )) or not 0.0 <= no_speech_probability <= 1.0 or compression_ratio < 0.0:
+            raise ValueError("invalid confidence values")
         if no_speech_probability > max_no_speech_probability:
-            continue
+            raise ValueError("high no-speech probability")
         if average_log_probability < min_avg_logprob:
-            continue
+            raise ValueError("low segment confidence")
         if compression_ratio > MAX_COMPRESSION_RATIO:
-            continue
-        text = str(segment.get("text", "")).strip()
-        if text:
-            accepted.append(text)
+            raise ValueError("repetitive decoding")
+        accepted.append(text.strip())
     transcript = " ".join(accepted)
-    if audio_duration_s > 0.0:
-        words_per_second = len(transcript.split()) / audio_duration_s
-        if words_per_second > MAX_WORDS_PER_SECOND:
-            return ""
+    if not math.isfinite(audio_duration_s) or audio_duration_s <= 0.0:
+        raise ValueError("invalid audio duration")
+    if len(transcript.split()) / audio_duration_s > MAX_WORDS_PER_SECOND:
+        raise ValueError("implausible transcript word rate")
+    # Compression metadata is per decode window; also catch repetition split
+    # across segments. Reject, do not rewrite/deduplicate the spoken command.
+    words = transcript.lower().split()
+    for size in range(1, min(8, len(words) // 4) + 1):
+        for start in range(len(words) - 4 * size + 1):
+            phrase = words[start:start + size]
+            if words[start:start + 4 * size] == phrase * 4:
+                raise ValueError("repeated phrase")
     return transcript
+
+
+def _transcribe_bounded(model, audio, options: dict):
+    """Reject a decode window at its token cap, before transcribe slices it.
+
+    SttNode serializes model access. Restore the instance method even on error;
+    no Whisper package files or class methods are modified.
+    """
+    decode = model.decode
+    original_override = model.__dict__.get("decode")
+    had_override = "decode" in model.__dict__
+
+    def checked_decode(*args, **kwargs):
+        result = decode(*args, **kwargs)
+        if len(result.tokens) >= options["sample_len"]:
+            raise ValueError("decode token limit reached; possible truncated command")
+        return result
+
+    model.decode = checked_decode
+    try:
+        return model.transcribe(audio, **options)
+    finally:
+        if had_override:
+            model.decode = original_override
+        else:
+            del model.decode
 
 
 def _load_stt_model(model_path: str):
@@ -120,11 +167,15 @@ class SttNode(Node):
         self._cb_group = ReentrantCallbackGroup()
         self._goal_lock = threading.Lock()
         self._goal_active = False
+        self._inference_done = threading.Event()
+        self._inference_done.set()
+        self._shutting_down = False
 
         self.get_logger().info("Loading Whisper model …")
         self.declare_parameter("whisper_model_path", _default_whisper_model_path())
         self.declare_parameter("language", "en")
         self.declare_parameter("beam_size", DEFAULT_BEAM_SIZE)
+        self.declare_parameter("max_decode_tokens", MAX_DECODE_TOKENS)
         self.declare_parameter("initial_prompt", "")
         self.declare_parameter(
             "max_no_speech_probability",
@@ -144,6 +195,7 @@ class SttNode(Node):
         self._beam_size = self.get_parameter(
             "beam_size"
         ).get_parameter_value().integer_value
+        self._max_decode_tokens = self.get_parameter("max_decode_tokens").value
         self._initial_prompt = self.get_parameter(
             "initial_prompt"
         ).get_parameter_value().string_value.strip()
@@ -164,14 +216,18 @@ class SttNode(Node):
                 f"Whisper input must be {EXPECTED_SAMPLE_RATE} Hz; "
                 "resampling is not implemented in this node."
             )
-        if self._max_audio_duration_s <= 0.0:
+        if not math.isfinite(self._max_audio_duration_s) or self._max_audio_duration_s <= 0.0:
             raise ValueError("Parameter 'max_audio_duration_s' must be greater than zero.")
         if self._beam_size < 1:
             raise ValueError("Parameter 'beam_size' must be at least 1.")
+        if not 1 <= self._max_decode_tokens <= 224:
+            raise ValueError("Parameter 'max_decode_tokens' must be between 1 and 224.")
         if not 0.0 <= self._max_no_speech_probability <= 1.0:
             raise ValueError(
                 "Parameter 'max_no_speech_probability' must be between 0.0 and 1.0."
             )
+        if not math.isfinite(self._min_avg_logprob):
+            raise ValueError("Parameter 'min_avg_logprob' must be finite.")
         self.get_logger().info(f"Whisper model path: {model_path}")
         self._stt_model = _load_stt_model(model_path)
         self.get_logger().info(
@@ -211,7 +267,7 @@ class SttNode(Node):
             return GoalResponse.REJECT
 
         with self._goal_lock:
-            if self._goal_active:
+            if self._goal_active or self._shutting_down:
                 self.get_logger().warn("Rejected STT goal because inference is already active.")
                 return GoalResponse.REJECT
             self._goal_active = True
@@ -226,7 +282,11 @@ class SttNode(Node):
         return CancelResponse.ACCEPT
 
     def _execute_callback(self, goal_handle):
+        self._inference_done.clear()
         try:
+            if self._shutting_down:
+                goal_handle.abort()
+                return SpeechToText.Result(transcript="")
             if goal_handle.is_cancel_requested:
                 self.get_logger().info("STT goal cancelled before inference started.")
                 goal_handle.canceled()
@@ -247,8 +307,9 @@ class SttNode(Node):
                 self._language,
                 self._beam_size,
                 self._initial_prompt,
+                self._max_decode_tokens,
             )
-            result_data = self._stt_model.transcribe(audio_f32, **transcribe_options)
+            result_data = _transcribe_bounded(self._stt_model, audio_f32, transcribe_options)
             transcript = _extract_confident_transcript(
                 result_data,
                 self._max_no_speech_probability,
@@ -276,6 +337,13 @@ class SttNode(Node):
             result = SpeechToText.Result()
             result.transcript = transcript
             return result
+        except ValueError as exc:
+            self.get_logger().warn(f"Whisper utterance rejected: {exc}")
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
+            return SpeechToText.Result(transcript="")
         except Exception as exc:
             self.get_logger().error(f"STT inference failed: {exc}")
             goal_handle.abort()
@@ -285,15 +353,21 @@ class SttNode(Node):
         finally:
             with self._goal_lock:
                 self._goal_active = False
+            self._inference_done.set()
 
     def destroy_node(self) -> None:
+        self._shutting_down = True
+        # Whisper has no safe mid-inference interruption. Preserve ROS handles
+        # until the current callback has finished using them.
+        self._inference_done.wait()
         if hasattr(self, "_action_server"):
             self._action_server.destroy()
         super().destroy_node()
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    # Let Python deliver Ctrl-C; close the ROS context after model callbacks.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = None
     try:
@@ -301,13 +375,17 @@ def main(args=None) -> None:
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         if node is not None:
             node.get_logger().info("SttNode shutting down …")
     finally:
         if node is not None:
+            node._shutting_down = True
+        if executor is not None:
+            executor.shutdown(timeout_sec=2.0)
+        if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

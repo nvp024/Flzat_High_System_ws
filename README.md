@@ -387,6 +387,68 @@ Use `use_low_mock:=true` while the production Low System is not connected.
 Change it to `false` when a real Low System subscribes to the command topic and
 publishes its own execution status.
 
+### Speech-only check
+
+Test microphone → VAD → Whisper → Piper without camera, RAG, or VLM:
+
+```bash
+ros2 launch flzat_speech speech_loopback_test.launch.py \
+  whisper_language:=en \
+  whisper_beam_size:=5 \
+  whisper_max_decode_tokens:=64 \
+  vad_silence_ms:=500
+```
+
+The default checkpoint remains `models/base.en.pt`; override it with
+`whisper_model_path:=/path/to/model.pt`. Loopback echoes accepted transcripts
+only and does not publish commands to the cognitive pipeline. Do not run it
+alongside the full pipeline (both own the microphone and speech actions).
+
+Speech launch settings are shared in `flzat_speech/launch_config.py`:
+
+- `pending_audio_max_age_s:=2.0`: retain only the latest pending utterance;
+  discard it if it has waited too long since this node received it.
+- `stt_timeout_s:=30.0`: discard late results and request cancellation. This
+  does **not** interrupt Whisper computation; the server stays busy until it returns.
+- `whisper_max_decode_tokens:=64`: reject a decode window reaching this cap
+  instead of forwarding potentially truncated text. Increase it for longer commands.
+- `tts_resume_delay_s:=0.8`: discard microphone backlog while TTS speaks and
+  during cooldown. This is half-duplex, not echo cancellation; spoken stop
+  commands cannot be heard during playback.
+- Piper settings (`piper_length_scale`, `tts_sentence_pause_ms`, model path,
+  output rate) are shared by full, local I/O, services and loopback launches.
+- `tts_speech_timeout_s:=60.0` bounds the Piper action; `tts_timeout_s:=65.0`
+  bounds client waiting (leave room for `tts_cancel_grace_s:=2.0`). The manager
+  checks acceptance/results and keeps at most the latest pending reply; replaced,
+  expired or failed replies are logged. A global text `stop` also cancels TTS.
+
+Low-confidence segments, repetitive output and implausible word rates reject
+the **whole utterance**, rather than removing words such as “not”. Logs include
+the rejection reason. These are safeguards, not a guarantee of transcription
+accuracy; microphone/noise testing is still required. VAD also discards stale
+mic backlog (>0.5 s). A dropped-sample gap or `speech_max_duration_s:=30.0`
+discards the interrupted utterance and ignores its tail until silence; truncated
+audio is not sent to STT. Graceful shutdown waits for active Whisper/Piper work
+before destroying its ROS handles; an unresponsive engine can delay shutdown.
+
+### Timestamped speech and camera context
+
+`/flzat/high_system/stt_result` now uses
+`flzat_high_interfaces/msg/SpeechTranscript` (`header`, `transcript`), not
+`std_msgs/String`. `RoutedCommand` also carries this header. Rebuild all packages
+and restart all participating nodes after updating; do not mix old/new interfaces.
+`/flzat/high_system/text_command` remains `std_msgs/String`.
+
+For speech, the timestamp is the VAD segment endpoint before STT, approximately
+the end of the utterance including endpoint silence (not sample-accurate audio
+capture synchronization). Text commands use their receipt time. Vision requests
+use that original stamp, including after routing inference, rather than the time
+STT finishes. The camera buffer defaults to `camera_buffer_duration_s:=35.0`;
+larger buffers cost RAM. If inference/routing outlasts the buffer, the request
+fails explicitly instead of silently selecting a newer scene. Camera and speech
+publishers must share the same ROS clock; split machines need synchronized clocks.
+Static images remain a test fixture, not a time-synchronized live camera.
+
 Test the Piper voice without running VAD, STT, RAG, or Qwen:
 
 ```bash

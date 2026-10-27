@@ -1,3 +1,5 @@
+# Original input time: speech endpoint or text-command receipt.
+std_msgs/Header header
 string router_version
 string utterance
 string mode

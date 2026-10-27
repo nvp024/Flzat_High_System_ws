@@ -35,6 +35,11 @@ def test_sentence_transformer_adapter_pins_revision_and_normalization(monkeypatc
         "sentence_transformers",
         SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=lambda **_: "/cache/model/snapshot"),
+    )
     embedder = SentenceTransformerEmbedder(
         "model-name", "revision-1", "cpu", local_files_only=True
     )
@@ -42,9 +47,8 @@ def test_sentence_transformer_adapter_pins_revision_and_normalization(monkeypatc
     vector = embedder.encode("semantic text")
 
     instance = FakeSentenceTransformer.instance
-    assert instance.model_name == "model-name"
+    assert instance.model_name == "/cache/model/snapshot"
     assert instance.kwargs == {
-        "revision": "revision-1",
         "device": "cpu",
         "trust_remote_code": False,
         "local_files_only": True,
@@ -52,6 +56,44 @@ def test_sentence_transformer_adapter_pins_revision_and_normalization(monkeypatc
     assert instance.encode_kwargs["normalize_embeddings"] is True
     assert len(vector) == 384
     assert vector[0] == 1.0
+
+
+def test_online_embedding_keeps_repository_id_and_revision(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    SentenceTransformerEmbedder(
+        "model-name", "revision-1", "cpu", local_files_only=False
+    )
+
+    instance = FakeSentenceTransformer.instance
+    assert instance.model_name == "model-name"
+    assert instance.kwargs["revision"] == "revision-1"
+    assert instance.kwargs["local_files_only"] is False
+
+
+def test_offline_embedding_reports_missing_cached_snapshot(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    def missing(**_):
+        raise FileNotFoundError("not cached")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=missing),
+    )
+    with pytest.raises(RuntimeError, match="not available in the local"):
+        SentenceTransformerEmbedder(
+            "missing-model", "revision-1", local_files_only=True
+        )
 
 
 def test_embedding_adapter_rejects_unexpected_dimension(monkeypatch):

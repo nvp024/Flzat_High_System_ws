@@ -101,6 +101,8 @@ def manager(tmp_path):
     node._publish_status = Mock()
     node._finish_metrics = Mock()
     node._speak = Mock()
+    node._stop_speech = Mock()
+    node._expire_speech = Mock()
     node.get_logger = Mock(return_value=Mock())
     node._vlm_client = ScriptedClient()
     node._validator = ModeOutputValidator(["find_object", "fetch_object", "navigate"])

@@ -13,8 +13,9 @@ def test_full_launch_can_switch_real_and_fake_boundaries():
     assert '"run_camera_node",' in source
     assert '"run_vad_node",' in source
     assert '"run_stt_node",' in source
-    assert 'DeclareLaunchArgument("whisper_model_path", default_value="")' in source
-    assert 'DeclareLaunchArgument("whisper_beam_size", default_value="5")' in source
+    assert '*speech_arguments()' in source
+    assert 'speech_parameters("stt")' in source
+    assert 'speech_parameters("ingress")' in source
     assert '"run_tts_node",' in source
     assert 'NotSubstitution(LaunchConfiguration("use_fake_speech"))' in source
     assert '"frame_source",' in source
@@ -50,13 +51,13 @@ def test_local_io_launch_owns_only_hardware_boundaries():
     assert '"/launch/flzat_vision_context.launch.py"' in source
     assert 'executable="vad_node"' in source
     assert 'executable="tts_node"' in source
-    assert '"piper_model_path": LaunchConfiguration("piper_model_path")' in source
+    assert 'speech_parameters("tts")' in source
     assert 'executable="stt_node"' not in source
     assert 'executable="speech_ingress"' not in source
-    assert 'DeclareLaunchArgument("mic_device"' in source
-    assert 'LaunchConfiguration("mic_device"), value_type=str' in source
+    assert '*speech_arguments(("vad", "tts"))' in source
+    assert 'speech_parameters("vad")' in source
     assert '"debug_fps",' in source
-    assert 'DeclareLaunchArgument("piper_model_path", default_value="")' in source
+    assert 'speech_parameters("tts")' in source
 
 
 def test_low_mock_supports_lifecycle_and_cancel_contracts():

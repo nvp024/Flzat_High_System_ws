@@ -11,6 +11,7 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from flzat_speech.launch_config import speech_arguments, speech_parameters
 
 
 DEFAULT_FAKE_RESPONSE = (
@@ -100,27 +101,12 @@ def generate_launch_description():
             default_value="true",
             description="Start the real speech-to-text action server",
         ),
-        DeclareLaunchArgument("whisper_model_path", default_value=""),
-        DeclareLaunchArgument("whisper_language", default_value="en"),
-        DeclareLaunchArgument("whisper_beam_size", default_value="5"),
-        DeclareLaunchArgument("whisper_initial_prompt", default_value=""),
-        DeclareLaunchArgument(
-            "whisper_max_no_speech_probability", default_value="0.65"
-        ),
-        DeclareLaunchArgument("whisper_min_avg_logprob", default_value="-1.0"),
+        *speech_arguments(),
         DeclareLaunchArgument(
             "run_tts_node",
             default_value="true",
             description="Start the real text-to-speech action server",
         ),
-        DeclareLaunchArgument("tts_volume", default_value="1.0"),
-        DeclareLaunchArgument("piper_model_path", default_value=""),
-        DeclareLaunchArgument("piper_config_path", default_value=""),
-        DeclareLaunchArgument("piper_length_scale", default_value="1.0"),
-        DeclareLaunchArgument("piper_use_cuda", default_value="false"),
-        DeclareLaunchArgument("tts_output_sample_rate", default_value="48000"),
-        DeclareLaunchArgument("tts_sentence_pause_ms", default_value="200"),
-        DeclareLaunchArgument("tts_max_chunk_characters", default_value="240"),
         DeclareLaunchArgument(
             "frame_source",
             default_value="camera",
@@ -197,6 +183,7 @@ def generate_launch_description():
             executable="vad_node",
             name="vad_node",
             output="screen",
+            parameters=[speech_parameters("vad")],
             condition=IfCondition(
                 AndSubstitution(
                     NotSubstitution(LaunchConfiguration("use_fake_speech")),
@@ -215,21 +202,7 @@ def generate_launch_description():
                     LaunchConfiguration("run_stt_node"),
                 )
             ),
-            parameters=[{
-                "whisper_model_path": LaunchConfiguration("whisper_model_path"),
-                "language": LaunchConfiguration("whisper_language"),
-                "beam_size": ParameterValue(
-                    LaunchConfiguration("whisper_beam_size"), value_type=int
-                ),
-                "initial_prompt": LaunchConfiguration("whisper_initial_prompt"),
-                "max_no_speech_probability": ParameterValue(
-                    LaunchConfiguration("whisper_max_no_speech_probability"),
-                    value_type=float,
-                ),
-                "min_avg_logprob": ParameterValue(
-                    LaunchConfiguration("whisper_min_avg_logprob"), value_type=float
-                ),
-            }],
+            parameters=[speech_parameters("stt")],
         ),
         Node(
             package="flzat_speech",
@@ -242,28 +215,7 @@ def generate_launch_description():
                     LaunchConfiguration("run_tts_node"),
                 )
             ),
-            parameters=[{
-                "tts_volume": ParameterValue(
-                    LaunchConfiguration("tts_volume"), value_type=float
-                ),
-                "piper_model_path": LaunchConfiguration("piper_model_path"),
-                "piper_config_path": LaunchConfiguration("piper_config_path"),
-                "piper_length_scale": ParameterValue(
-                    LaunchConfiguration("piper_length_scale"), value_type=float
-                ),
-                "piper_use_cuda": ParameterValue(
-                    LaunchConfiguration("piper_use_cuda"), value_type=bool
-                ),
-                "output_sample_rate": ParameterValue(
-                    LaunchConfiguration("tts_output_sample_rate"), value_type=int
-                ),
-                "sentence_pause_ms": ParameterValue(
-                    LaunchConfiguration("tts_sentence_pause_ms"), value_type=int
-                ),
-                "max_chunk_characters": ParameterValue(
-                    LaunchConfiguration("tts_max_chunk_characters"), value_type=int
-                ),
-            }],
+            parameters=[speech_parameters("tts")],
         ),
         Node(
             package="flzat_high_bringup",
@@ -285,6 +237,7 @@ def generate_launch_description():
             executable="speech_ingress",
             name="speech_ingress",
             output="screen",
+            parameters=[speech_parameters("ingress")],
         ),
         Node(
             package="flzat_cognitive_pipeline",
@@ -334,6 +287,9 @@ def generate_launch_description():
             name="cognitive_manager",
             output="screen",
             parameters=[config, {
+                "tts_timeout_s": ParameterValue(
+                    LaunchConfiguration("tts_timeout_s"), value_type=float
+                ),
                 "environment_id": LaunchConfiguration("environment_id"),
                 "map_id": LaunchConfiguration("map_id"),
                 "output_root": LaunchConfiguration("output_root"),

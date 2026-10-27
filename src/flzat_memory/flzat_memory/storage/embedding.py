@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from pathlib import Path
 from typing import Protocol, Sequence
 
 from flzat_memory.storage.memory_record import EMBEDDING_DIMENSION
@@ -34,12 +35,25 @@ class SentenceTransformerEmbedder:
         self.model_name = model_name
         self.revision = revision
         self.dimension = EMBEDDING_DIMENSION
-        self._model = SentenceTransformer(
+        model_source, source_is_local = _resolve_model_source(
             model_name,
-            revision=revision,
-            device=device,
-            trust_remote_code=False,
+            revision,
             local_files_only=local_files_only,
+        )
+        load_kwargs = {
+            "device": device,
+            "trust_remote_code": False,
+            "local_files_only": local_files_only,
+        }
+        # Passing a repository ID to Transformers 4.57 may still trigger a
+        # Hub model_info() request while constructing the tokenizer, even when
+        # local_files_only=True.  A concrete snapshot path is fully offline and
+        # already identifies the requested revision.
+        if not source_is_local:
+            load_kwargs["revision"] = revision
+        self._model = SentenceTransformer(
+            model_source,
+            **load_kwargs,
         )
         dimension = self._model.get_sentence_embedding_dimension()
         if dimension != self.dimension:
@@ -57,6 +71,34 @@ class SentenceTransformerEmbedder:
         result = tuple(float(value) for value in vector)
         _validate_embedding(result, self.dimension)
         return result
+
+
+def _resolve_model_source(
+    model_name: str,
+    revision: str,
+    *,
+    local_files_only: bool,
+) -> tuple[str, bool]:
+    """Resolve an offline Hub model ID to its cached snapshot directory."""
+    local_path = Path(model_name).expanduser()
+    if local_path.is_dir():
+        return str(local_path.resolve()), True
+    if not local_files_only:
+        return model_name, False
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot = snapshot_download(
+            repo_id=model_name,
+            revision=revision,
+            local_files_only=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "embedding model is not available in the local Hugging Face cache: "
+            f"{model_name}@{revision}"
+        ) from exc
+    return str(Path(snapshot).resolve()), True
 
 
 class DeterministicTestEmbedder:

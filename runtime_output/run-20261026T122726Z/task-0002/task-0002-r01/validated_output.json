@@ -1,0 +1,1 @@
+{"mode":"task_command","output":{"clarification_question":null,"execution_strategy":"search","intent":"fetch_object","missing_information":[],"selected_context_refs":[],"speech":"I will ask the robot to search for the water cup.","target":{"name":"water_cup","type":"object"}},"schema_version":"flzat.validated_output.v1"}

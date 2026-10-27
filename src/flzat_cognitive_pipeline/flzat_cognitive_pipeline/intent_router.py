@@ -15,10 +15,10 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Header, String
 import yaml
 
-from flzat_high_interfaces.msg import RoutedCommand
+from flzat_high_interfaces.msg import RoutedCommand, SpeechTranscript
 from flzat_memory.storage.embedding import (
     DeterministicTestEmbedder,
     SentenceTransformerEmbedder,
@@ -437,9 +437,9 @@ class IntentRouterNode(Node):
             String, "/flzat/high_system/cancel", qos
         )
         self._stt_sub = self.create_subscription(
-            String,
+            SpeechTranscript,
             "/flzat/high_system/stt_result",
-            self._on_utterance,
+            self._on_speech,
             qos,
         )
         self._text_sub = None
@@ -458,9 +458,16 @@ class IntentRouterNode(Node):
         )
 
     def _on_utterance(self, message: String) -> None:
+        self._route_utterance(message.data, Header(stamp=self.get_clock().now().to_msg()))
+
+    def _on_speech(self, message: SpeechTranscript) -> None:
+        self._route_utterance(message.transcript, message.header)
+
+    def _route_utterance(self, text: str, header: Header) -> None:
         try:
-            decision = self._router.route(message.data)
+            decision = self._router.route(text)
             routed = RoutedCommand()
+            routed.header = header
             routed.router_version = decision.router_version
             routed.utterance = decision.utterance
             routed.mode = decision.mode

@@ -9,6 +9,8 @@ from pathlib import Path
 import threading
 import time
 from typing import Optional
+from builtin_interfaces.msg import Time
+from action_msgs.msg import GoalStatus
 
 import rclpy
 from rclpy.action import ActionClient
@@ -78,6 +80,7 @@ class RuntimeRequest:
     vlm_goal_handle: object | None = None
     routing_pending: dict[str, object] | None = None
     routing_stage: bool = False
+    input_stamp: Time | None = None
 
 
 class CognitiveManagerNode(Node):
@@ -218,6 +221,14 @@ class CognitiveManagerNode(Node):
         self._tts_client = ActionClient(
             self, TextToSpeech, "/tts_action", callback_group=self._cb_group
         )
+        self._speech_serial = 0
+        self._speech_busy = False
+        self._speech_handle = None
+        self._speech_pending = None
+        self._speech_deadline = 0.0
+        self._speech_timeout_s = float(self.get_parameter("tts_timeout_s").value)
+        if not math.isfinite(self._speech_timeout_s) or self._speech_timeout_s <= 0:
+            raise ValueError("tts_timeout_s must be finite and positive")
         self._memory_client = self.create_client(
             QueryMemory, "/environment_memory/query", callback_group=self._cb_group
         )
@@ -258,6 +269,7 @@ class CognitiveManagerNode(Node):
         self.declare_parameter("max_repair_attempts", 2)
         self.declare_parameter("request_timeout_s", 60.0)
         self.declare_parameter("health_period_s", 2.0)
+        self.declare_parameter("tts_timeout_s", 65.0)
         self.declare_parameter("prompt_directory", "")
         self.declare_parameter("context_policy_path", "")
         self.declare_parameter("skill_registry_path", "")
@@ -334,6 +346,7 @@ class CognitiveManagerNode(Node):
                 "latency_ms": float(message.latency_ms),
             },
             needs_routing=needs_routing,
+            input_stamp=message.header.stamp,
         )
 
     def _accept_transcript(
@@ -344,6 +357,7 @@ class CognitiveManagerNode(Node):
         router_record: dict[str, object],
         *,
         needs_routing: bool = False,
+        input_stamp: Time | None = None,
     ) -> None:
         with self._lock:
             if self._active is not None:
@@ -380,6 +394,7 @@ class CognitiveManagerNode(Node):
                 router_record=router_record,
                 routing_pending=pending,
                 routing_stage=needs_routing,
+                input_stamp=input_stamp,
             )
             self._telemetry.begin(task.request_id, task.task_id, source)
             self._active = runtime
@@ -677,7 +692,9 @@ class CognitiveManagerNode(Node):
         if not runtime.policy.needs_vision:
             self._reject(runtime, "ContextPolicy forbids frame lookup for this mode")
             return
-        stamp = self.get_clock().now().to_msg()
+        stamp = runtime.input_stamp
+        if stamp is None or not (stamp.sec or stamp.nanosec):
+            stamp = self.get_clock().now().to_msg()
         if not self._frame_client.service_is_ready():
             self._reject(runtime, "frame service is unavailable")
             return
@@ -1034,6 +1051,8 @@ class CognitiveManagerNode(Node):
 
     def _on_cancel(self, message: String) -> None:
         requested_id = message.data.strip()
+        if not requested_id:
+            self._stop_speech()
         low_cancel_payload = ""
         with self._lock:
             runtime = self._active
@@ -1080,6 +1099,8 @@ class CognitiveManagerNode(Node):
             self._low_cancel_pub.publish(String(data=low_cancel_payload))
 
     def _on_timer(self) -> None:
+        with self._lock:
+            self._expire_speech()
         with self._lock:
             runtime = self._active
             if runtime is None or time.monotonic_ns() < runtime.deadline_ns:
@@ -1245,12 +1266,91 @@ class CognitiveManagerNode(Node):
         value = text.strip()
         if not value:
             return
-        if not self._tts_client.server_is_ready():
-            self.get_logger().warn("TTS unavailable; speech was not played.")
-            return
-        goal = TextToSpeech.Goal()
-        goal.text = value
-        self._tts_client.send_goal_async(goal)
+        with self._lock:
+            if self._speech_busy:
+                if self._speech_pending is not None:
+                    self.get_logger().warn("TTS busy; replaced older queued reply.")
+                self._speech_pending = (value, time.monotonic())
+                return
+            if not self._tts_client.server_is_ready():
+                self.get_logger().warn("TTS unavailable; speech was not played.")
+                return
+            self._speech_serial += 1
+            serial = self._speech_serial
+            self._speech_busy = True
+            self._speech_deadline = time.monotonic() + self._speech_timeout_s
+            try:
+                self._tts_client.send_goal_async(TextToSpeech.Goal(text=value)).add_done_callback(
+                    lambda future: self._on_speech_goal(serial, future)
+                )
+            except Exception as exc:
+                self.get_logger().warn(f"TTS dispatch failed: {exc}")
+                self._finish_speech()
+
+    def _on_speech_goal(self, serial: int, future) -> None:
+        with self._lock:
+            self._expire_speech()
+            try:
+                handle = future.result()
+                if serial != self._speech_serial or not self._speech_busy:
+                    if handle.accepted:
+                        handle.cancel_goal_async()
+                    return
+                if not handle.accepted:
+                    self.get_logger().warn("TTS rejected reply; speech was not played.")
+                    self._finish_speech()
+                    return
+                self._speech_handle = handle
+                handle.get_result_async().add_done_callback(
+                    lambda result: self._on_speech_result(serial, result)
+                )
+            except Exception as exc:
+                self.get_logger().warn(f"TTS goal failed: {exc}")
+                if serial == self._speech_serial:
+                    self._finish_speech()
+
+    def _on_speech_result(self, serial: int, future) -> None:
+        with self._lock:
+            self._expire_speech()
+            if serial != self._speech_serial or not self._speech_busy:
+                return
+            try:
+                response = future.result()
+                if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
+                    self.get_logger().warn(f"TTS reply failed: status={response.status}.")
+                else:
+                    self.get_logger().debug("TTS reply completed.")
+            except Exception as exc:
+                self.get_logger().warn(f"TTS result failed: {exc}")
+            self._finish_speech()
+
+    def _expire_speech(self) -> None:
+        if self._speech_busy and time.monotonic() >= self._speech_deadline:
+            self.get_logger().warn("TTS response timed out; discarding queued speech.")
+            self._stop_speech()
+
+    def _finish_speech(self) -> None:
+        self._speech_serial += 1
+        self._speech_busy = False
+        self._speech_handle = None
+        pending, self._speech_pending = self._speech_pending, None
+        if pending is not None:
+            text, received_at = pending
+            if time.monotonic() - received_at < self._speech_timeout_s:
+                self._speak(text)
+            else:
+                self.get_logger().warn("Discarded expired queued TTS reply.")
+
+    def _stop_speech(self) -> None:
+        with self._lock:
+            handle = self._speech_handle
+            self._speech_pending = None
+            self._finish_speech()
+            if handle is not None:
+                try:
+                    handle.cancel_goal_async()
+                except Exception as exc:
+                    self.get_logger().warn(f"TTS cancellation failed: {exc}")
 
     def _remember_turn(self, runtime: RuntimeRequest, assistant: str) -> None:
         if not assistant.strip():
@@ -1372,6 +1472,7 @@ class CognitiveManagerNode(Node):
         return str(self.get_parameter(name).value).strip()
 
     def destroy_node(self) -> None:
+        self._stop_speech()
         self._vlm_client.destroy()
         self._tts_client.destroy()
         super().destroy_node()

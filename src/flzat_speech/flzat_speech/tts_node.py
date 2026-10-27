@@ -12,8 +12,9 @@ import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import Bool
 
@@ -252,6 +253,10 @@ class TtsNode(Node):
         self._active_token: Optional[object] = None
         self._active_engine: Optional[_PiperEngine] = None
         self._cb_group = ReentrantCallbackGroup()
+        self._execution_done = threading.Event()
+        self._execution_done.set()
+        self._shutting_down = False
+        self._speech_worker = None
 
         self.declare_parameter("tts_volume", TTS_VOLUME)
         self.declare_parameter("piper_model_path", "")
@@ -352,7 +357,7 @@ class TtsNode(Node):
             return GoalResponse.REJECT
 
         with self._state_lock:
-            if self._goal_reserved:
+            if self._goal_reserved or self._shutting_down:
                 self.get_logger().warn(
                     "Rejected TTS goal because another speech request is active."
                 )
@@ -379,9 +384,20 @@ class TtsNode(Node):
             self._active_engine = None
             self._active_token = None
             self._goal_reserved = False
-        self._publish_tts_active(False)
+            # Publish before another goal can claim the speaker slot.
+            self._publish_tts_active(False)
 
     def _execute_callback(self, goal_handle):
+        self._execution_done.clear()
+        try:
+            if self._shutting_down:
+                goal_handle.abort()
+                return TextToSpeech.Result(success=False)
+            return self._execute_speech(goal_handle)
+        finally:
+            self._execution_done.set()
+
+    def _execute_speech(self, goal_handle):
         text = goal_handle.request.text.strip()
         token = object()
         self.get_logger().info(f"[TTS] '{text}'")
@@ -423,6 +439,7 @@ class TtsNode(Node):
         with self._state_lock:
             self._active_engine = engine
         speech_thread = threading.Thread(target=_speech_thread, daemon=True)
+        self._speech_worker = speech_thread
         speech_thread.start()
 
         deadline = time.monotonic() + self._speech_timeout_s
@@ -467,31 +484,43 @@ class TtsNode(Node):
         return result
 
     def destroy_node(self) -> None:
+        self._shutting_down = True
         self._stop_event.set()
         with self._state_lock:
             engine = self._active_engine
         if engine is not None:
             engine.request_stop()
+        self._execution_done.wait()
+        if self._speech_worker is not None:
+            # A timed-out action may still own a synthesis worker. Do not destroy
+            # publishers/action handles while that worker can use them.
+            self._speech_worker.join()
         if hasattr(self, "_action_server"):
             self._action_server.destroy()
         super().destroy_node()
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
+    executor = None
     try:
         node = TtsNode()
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         if node is not None:
             node.get_logger().info("TtsNode shutting down …")
     finally:
         if node is not None:
+            node._shutting_down = True
+            node._engine.request_stop()
+        if executor is not None:
+            executor.shutdown(timeout_sec=2.0)
+        if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

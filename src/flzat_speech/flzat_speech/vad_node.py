@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import math
 import os
 import threading
 import time
@@ -79,8 +80,8 @@ class _VADStream:
         self._torch = torch
 
         chunk_ms = CHUNK_SAMPLES / SAMPLE_RATE * 1000
-        self._silence_chunks    = max(1, int(silence_ms / chunk_ms))
-        self._min_speech_chunks = max(1, int(MIN_SPEECH_MS / chunk_ms))
+        self._silence_chunks    = max(1, math.ceil(silence_ms / chunk_ms))
+        self._min_speech_chunks = max(1, math.ceil(MIN_SPEECH_MS / chunk_ms))
         self._max_segment_chunks = max(
             1,
             int(max_segment_duration_s * SAMPLE_RATE / CHUNK_SAMPLES),
@@ -101,7 +102,13 @@ class _VADStream:
         self._silence_count = 0
         self._speech_frames = []
         self._speech_count = 0
+        self._discard_until_silence = False
         self._model.reset_states()
+
+    def discard_until_silence(self) -> None:
+        """Do not interpret the tail of an interrupted utterance as a new command."""
+        self.reset()
+        self._discard_until_silence = True
 
     def _finish_segment(self, event: str):
         frames = self._speech_frames.copy()
@@ -111,7 +118,8 @@ class _VADStream:
         self._speech_count = 0
         self._silence_count = 0
         if event == "max_duration":
-            self._model.reset_states()
+            self.discard_until_silence()
+            return (event, [])
         if speech_count >= self._min_speech_chunks:
             return (event, frames)
         return None
@@ -122,6 +130,12 @@ class _VADStream:
             confidence = self._model(tensor, SAMPLE_RATE).item()
 
         is_voice = confidence >= VAD_THRESHOLD
+
+        if self._discard_until_silence:
+            self._silence_count = 0 if is_voice else self._silence_count + 1
+            if self._silence_count >= self._silence_chunks:
+                self.reset()
+            return None
 
         if is_voice:
             if not self._in_speech:
@@ -156,24 +170,22 @@ class _MicReader:
         self._sample_rate   = sample_rate
         self._chunk_samples = chunk_samples
         self._device = device
-        self._queue: collections.deque[np.ndarray] = collections.deque(maxlen=queue_size)
+        self._queue: collections.deque = collections.deque(maxlen=queue_size)
         self._queue_lock = threading.Lock()
         self._dropped_chunks = 0
         self._stream = None
 
     def _callback(self, indata, frames, time_info, status) -> None:
         chunk = indata[:, 0].copy()
-        # No resampling is needed here: sysdefault routes through PulseAudio,
-        # which performs device-side sample-rate conversion.
         with self._queue_lock:
-            if status:
-                # The node will continue with the next callback, but the status is
-                # exposed through the queue-overflow diagnostic below.
+            if status or frames != self._chunk_samples or len(chunk) != self._chunk_samples:
                 self._dropped_chunks += 1
+                self._queue.clear()
+                return
             if len(self._queue) == self._queue.maxlen:
                 self._queue.popleft()
                 self._dropped_chunks += 1
-            self._queue.append(chunk[: self._chunk_samples])
+            self._queue.append((time.monotonic(), chunk))
 
     def start(self) -> None:
         try:
@@ -198,15 +210,22 @@ class _MicReader:
             self._stream.stop()
             self._stream.close()
 
-    def pop(self) -> Optional[np.ndarray]:
+    def clear(self) -> None:
         with self._queue_lock:
-            return self._queue.popleft() if self._queue else None
+            self._queue.clear()
+            self._dropped_chunks = 0
 
-    def consume_dropped_chunks(self) -> int:
+    def pop(self) -> tuple[Optional[np.ndarray], int]:
+        """Read audio and discontinuity state atomically; discard old backlog."""
         with self._queue_lock:
+            if self._queue and time.monotonic() - self._queue[0][0] > 0.5:
+                self._dropped_chunks += len(self._queue)
             dropped_chunks = self._dropped_chunks
             self._dropped_chunks = 0
-            return dropped_chunks
+            if dropped_chunks:
+                self._queue.clear()
+                return None, dropped_chunks
+            return (self._queue.popleft()[1] if self._queue else None), 0
 
 
 class VadNode(Node):
@@ -245,12 +264,12 @@ class VadNode(Node):
             raise ValueError(
                 f"Parameter 'silence_ms' must be at least {chunk_ms:.0f} ms."
             )
-        if max_segment_duration_s < MIN_SPEECH_MS / 1000:
+        if not math.isfinite(max_segment_duration_s) or max_segment_duration_s < MIN_SPEECH_MS / 1000:
             raise ValueError(
                 "Parameter 'max_segment_duration_s' must not be shorter "
                 "than MIN_SPEECH_MS."
             )
-        if self._tts_resume_delay_s < 0.0:
+        if not math.isfinite(self._tts_resume_delay_s) or self._tts_resume_delay_s < 0.0:
             raise ValueError("Parameter 'tts_resume_delay_s' cannot be negative.")
 
         voice_state_qos = QoSProfile(
@@ -290,9 +309,11 @@ class VadNode(Node):
     def _on_tts_active(self, msg: Bool) -> None:
         if msg.data and not self._tts_active:
             self._vad_stream.reset()
+            self._mic.clear()
             self.get_logger().debug("TTS active — VAD paused to prevent speaker feedback.")
         elif not msg.data and self._tts_active:
             self._vad_stream.reset()
+            self._mic.clear()
             self._resume_vad_at = time.monotonic() + self._tts_resume_delay_s
             self.get_logger().debug(
                 f"TTS inactive — VAD resumes after "
@@ -301,17 +322,23 @@ class VadNode(Node):
         self._tts_active = msg.data
 
     def _timer_callback(self) -> None:
-        chunk = self._mic.pop()
-        if chunk is None:
+        if self._tts_active or time.monotonic() < self._resume_vad_at:
+            self._mic.clear()
+            return
+        if self._resume_vad_at:
+            # The timer may have stalled for the entire cooldown. Do not process
+            # samples captured while listening was intentionally disabled.
+            self._mic.clear()
+            self._resume_vad_at = 0.0
             return
 
-        dropped_chunks = self._mic.consume_dropped_chunks()
+        chunk, dropped_chunks = self._mic.pop()
         if dropped_chunks:
+            self._vad_stream.discard_until_silence()
             self.get_logger().warn(
-                f"Microphone queue overflow/status: dropped {dropped_chunks} audio chunk(s)."
+                f"Microphone discontinuity/backlog: discarded {dropped_chunks} chunk(s); reset VAD."
             )
-
-        if self._tts_active or time.monotonic() < self._resume_vad_at:
+        if chunk is None:
             return
 
         result = self._vad_stream.process(chunk)
@@ -323,9 +350,8 @@ class VadNode(Node):
             self.get_logger().info("🟢 Voice detected — listening …")
         elif event == "max_duration":
             self.get_logger().warn(
-                "Maximum speech duration reached — transcribing current segment."
+                "Speech too long — discarded utterance; waiting for silence."
             )
-            self._publish_segment(frames)
         elif event == "end":
             self._publish_segment(frames)
 

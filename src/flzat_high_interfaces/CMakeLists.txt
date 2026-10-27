@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MemoryObject.msg"
   "msg/RoutedCommand.msg"
   "msg/SpeechAudio.msg"
+  "msg/SpeechTranscript.msg"
   "srv/GetFrameNear.srv"
   "srv/QueryMemory.srv"
   "action/RunVlm.action"

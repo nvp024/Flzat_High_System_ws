@@ -1,0 +1,1 @@
+{"attempts":3,"reason":"output validation failed after repair limit","schema_version":"flzat.request_failure.v1","validation_error":"response fields do not match the mode schema"}

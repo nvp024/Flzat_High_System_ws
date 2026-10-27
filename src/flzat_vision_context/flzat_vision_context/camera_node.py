@@ -122,7 +122,7 @@ class CameraNode(Node):
         self.declare_parameter("camera_fps", 15.0)
         self.declare_parameter("camera_retry_s", 2.0)
         self.declare_parameter("capture_queue_size", 2)
-        self.declare_parameter("buffer_duration_s", 5.0)
+        self.declare_parameter("buffer_duration_s", 35.0)
         self.declare_parameter("jpeg_quality", 80)
         self.declare_parameter("debug_fps", 5.0)
 

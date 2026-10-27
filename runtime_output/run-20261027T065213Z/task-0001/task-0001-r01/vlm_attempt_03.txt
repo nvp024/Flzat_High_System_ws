@@ -1,0 +1,1 @@
+{"intent":"fetch_object","target":{"type":"object","name":"water_cup"},"selected_context_refs":[],"execution_strategy":"search","missing_information":[],"clarification_question":null,"speech":"I will ask the robot to search for the water cup."}
