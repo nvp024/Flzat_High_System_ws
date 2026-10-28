@@ -54,7 +54,8 @@ def test_policy_selects_only_required_mode_context():
 
     assert visual.needs_vision and not visual.needs_task_memory
     assert not general.needs_vision and not general.needs_task_memory
-    assert social.needs_conversation_memory and social.needs_user_profile
+    assert not social.needs_conversation_memory and social.needs_user_profile
+    assert "needs_conversation_memory" in social.corrected_flags
     assert clarify.needs_conversation_memory and not clarify.needs_vision
     assert not any(
         item.allows_low_command for item in (visual, general, social, clarify)
@@ -102,7 +103,7 @@ def test_adaptive_context_keeps_conversation_separate_from_object_memory():
     assert context.context_items == []
     assert context.context_refs == ()
     assert context.include_rag_context is False
-    assert context.dialogue_history[0]["user"] == "I feel tired"
+    assert context.dialogue_history == []
     assert context.trusted_context["user_profile"]["preferred_language"] == "en"
     assert context.trusted_context["skill_registry"][0]["name"] == "navigate"
 

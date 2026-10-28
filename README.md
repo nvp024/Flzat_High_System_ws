@@ -24,7 +24,7 @@ references only and are not imported by this workspace.
 
 ## Current status
 
-Last updated: **20 October 2026**
+Last updated: **28 October 2026**
 
 Available now:
 
@@ -53,55 +53,44 @@ records but does not update the Chroma database.
 
 ### Conditional Qwen routing and clarification
 
-Confident embedding routes proceed directly to the selected prompt profile.
-An embedding `clarification` result now triggers a short, text-only Qwen
-classification call before any RAG retrieval or camera lookup. Every reply while
-a clarification is pending also goes through this step, even if its standalone
-embedding route is confident.
+- Confident embedding routes go directly to the matching prompt. Uncertain
+  routes or replies to pending clarification first use a short, text-only Qwen
+  classification call, before RAG or image retrieval.
+- Qwen selects the request type and distinguishes a continuation from a new
+  request. Once resolved, the main inference uses the appropriate prompt;
+  otherwise, the robot asks for clarification. No automatic conversion to
+  `task_command` is applied.
+- Continuations preserve the current task's clarification history. New requests
+  start independently; social dialogue does not reuse recent conversation turns.
+- Both inference stages share the same loaded model. Stop/cancel bypasses routing
+  inference.
 
-The routing call selects `general_qa`, `visual_qa`, `task_command`, or
-`social_dialogue`, decides `continue` versus `new_request`, and asks a relevant
-question only if information is actually missing. An unresolved category may be
-`null` while asking for clarification. There is no automatic
-`clarification -> task_command` conversion.
-When there is no pending task, Manager normalizes the relationship to
-`new_request` even if the model returns `continue`. This does not change the
-selected mode or relax validation of other routing fields.
+## Next Development Priorities
 
-For a continuation, the main inference receives the original transcript and
-question/answer history with the resolved mode's specialized prompt. An
-independent request cancels the pending task and starts a new task with clean
-history. The same loaded VLM serves both calls; confident requests still need
-only the main inference. `stop`/cancel bypasses routing inference.
+Planned work, not completed functionality:
 
-Example: `Who is the president?` -> `Which country do you mean?` -> `America`
-stays in general QA. Asking `What is the capital of Japan?` instead starts a new
-general-QA task. General QA does not query object memory or request an image.
-This routing change does not add a live external-knowledge provider.
+- **Temporary memory:** retain relevant dialogue, referenced objects, and task
+  state across related turns. Distinguish follow-up questions from new requests,
+  with expiration and reset rules to prevent stale context from leaking into
+  unrelated answers. Keep this separate from long-term environment memory.
+- **Richer RAG–VLM interaction:** extend the existing semantic retrieval beyond
+  selecting an object and its coordinates. Provide relevant attributes,
+  relationships, multiple candidates, and observation freshness so the VLM can
+  interpret requests in context. Improve both memory representation and retrieval;
+  prompts alone cannot supply missing facts. Coordinates must remain grounded in
+  trusted data, not invented by the model.
+- **Qwen optimization for Jetson Orin NX:** benchmark latency and memory use with
+  the other pipeline components running, then optimize inference, image size,
+  and token budgets for the target RAM and JetPack configuration. Verify model
+  quality and JSON validity alongside performance.
+- **Prompt and JSON refinement:** reduce redundant instructions while preserving
+  modular prompts. Extend the output contract to retain object attributes,
+  source/destination relationships, constraints, and ordered actions for detailed
+  commands. Clarify ambiguous references rather than guessing; leave low-level
+  motion planning to the Low System.
 
-Routing goals use `<request_id>-routing`; main inference keeps `<request_id>`.
-The request directory contains `routing_prompt.txt`, `routing_response.txt`,
-and `resolved_routing.json` (when routing succeeds), alongside normal inference
-artifacts. For a topic switch, `routing_source_request` links the new task to
-the classification performed under the previous task. Initial `router.json`
-records the embedding decision; `resolved_routing.json` records the final mode
-and effective context policy. Invalid routing output fails closed without RAG
-or Low-System dispatch. Routing and main inference share the request timeout.
-
-Fake VLM uses separate routing and main response fixtures. Configure the routing
-fixture with `fake_routing_response` at launch, or set the running node:
-
-```bash
-ros2 param set /fake_vlm_server routing_response_text \
-  '{"mode":"general_qa","relation_to_pending":"new_request","needs_clarification":false,"clarification_question":null}'
-ros2 param set /fake_vlm_server response_text \
-  '{"reply":"This is a scripted general-QA response.","speak":true,"requires_robot_action":false}'
-```
-
-Use `relation_to_pending:"continue"` to test a clarification answer. The fake
-server also accepts independent `routing_response_sequence` and
-`response_sequence` string-array parameters for scripted multi-turn tests.
-These fixtures test orchestration, not semantic classification accuracy.
+Start with representative test cases and the output contract, then align RAG and
+prompts, add temporary memory, and optimize deployment using the same tests.
 
 ## Workspace layout
 

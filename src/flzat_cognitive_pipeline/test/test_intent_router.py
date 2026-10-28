@@ -44,7 +44,7 @@ def test_config_has_all_routes_and_explicit_context_flags():
     assert config.policy("task_command").needs_task_memory is True
     assert config.policy("visual_qa").needs_vision is True
     assert config.policy("general_qa").needs_task_memory is False
-    assert config.policy("social_dialogue").needs_conversation_memory is True
+    assert config.policy("social_dialogue").needs_conversation_memory is False
     assert config.policy("clarification").needs_conversation_memory is True
 
 

@@ -92,11 +92,9 @@ class AdaptiveContextBuilder:
             trusted["user_profile"] = self._profile.get()
 
         dialogue: list[dict[str, str]] = []
-        if policy.needs_conversation_memory and policy.mode in {
-            "social_dialogue",
-            "clarification",
-        }:
+        if policy.needs_conversation_memory and policy.mode == "clarification":
             dialogue.extend(self._conversation.recent())
+        # Explicit clarification belongs to this request, not general chat history.
         dialogue.extend(
             {"question": question, "answer": answer}
             for question, answer in task.clarification_history

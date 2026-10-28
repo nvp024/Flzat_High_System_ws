@@ -88,7 +88,7 @@ routes:
   social_dialogue:
     needs_vision: false
     needs_task_memory: false
-    needs_conversation_memory: true
+    needs_conversation_memory: false
     needs_user_profile: true
     needs_external_knowledge: false
     examples:

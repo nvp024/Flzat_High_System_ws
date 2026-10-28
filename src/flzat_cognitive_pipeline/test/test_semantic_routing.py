@@ -158,6 +158,50 @@ def test_confident_general_question_calls_model_once(manager):
     manager._query_memory.assert_not_called()
 
 
+def test_social_requests_do_not_reuse_previous_topic(manager):
+    send(manager, "Do you know Vietnam?", "general_qa")
+    manager._vlm_client.finish(json.dumps({
+        "reply": "Vietnam is a country in Southeast Asia.",
+        "speak": True, "requires_robot_action": False,
+    }))
+    assert len(manager._conversation) == 1
+    for text in ("Can you hear me?", "Thank you.", "Hello."):
+        send(manager, text, "social_dialogue")
+        goal = manager._vlm_client.calls[-1].goal
+        value = runtime_input(goal)
+        assert value["english_transcript"] == text
+        assert value["router_mode"] == "social_dialogue"
+        assert "dialogue_history" not in value
+        assert "Vietnam" not in goal.user_prompt
+        assert "user_profile" in value["trusted_context"]
+        assert "skill_registry" in value["trusted_context"]
+        assert not goal.image.data
+        manager._vlm_client.finish(json.dumps({
+            "reply": "Hello!", "speak": True, "suggested_skill": None,
+        }))
+    manager._query_memory.assert_not_called()
+    manager._obtain_frame.assert_not_called()
+
+
+def test_social_clarification_preserves_only_current_request(manager):
+    manager._conversation.append("general_qa", "Vietnam?", "About Vietnam.")
+    send(manager, "I feel that way")
+    manager._vlm_client.finish(route("social_dialogue", question="How do you feel?"))
+    send(manager, "Tired")
+    manager._vlm_client.finish(route("social_dialogue", relation="continue"))
+    goal = manager._vlm_client.calls[-1].goal
+    value = runtime_input(goal)
+    assert value["english_transcript"] == "I feel that way"
+    assert value["dialogue_history"] == [
+        {"question": "How do you feel?", "answer": "Tired"},
+    ]
+    assert "Vietnam" not in goal.user_prompt
+    manager._vlm_client.finish(json.dumps({
+        "reply": "Take a rest if you can.", "speak": True, "suggested_skill": None,
+    }))
+    assert manager._tasks.get("task-0001").state == PipelineState.RESPONSE_ONLY
+
+
 def start_country_clarification(manager):
     send(manager, "Who is the president?")
     manager._vlm_client.finish(route(question="Which country do you mean?"))
