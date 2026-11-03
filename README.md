@@ -5,6 +5,9 @@ Cognitive Pipeline. It receives an English voice or text command, gathers the
 required visual and memory context, calls Qwen3-VL, validates the model output,
 and publishes a normalized JSON command for the Low System.
 
+For the complete architecture, prompt composition, input/output examples, and
+implementation limits, see [Detailed Pipeline Guide (Vietnamese)](PIPELINE_DETAILED_GUIDE.md).
+
 ```text
 Microphone or text command
   -> VAD

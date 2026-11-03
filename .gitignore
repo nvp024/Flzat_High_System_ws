@@ -35,3 +35,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Markdown documentation (keep README files at any directory level)
+*.[mM][dD]
+![rR][eE][aA][dD][mM][eE].[mM][dD]
