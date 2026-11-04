@@ -1,12 +1,14 @@
-"""Assemble Low-System commands exclusively from validated trusted context."""
+"""Assemble High-to-Low handoffs exclusively from validated trusted context."""
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 from typing import Any, Callable
 
 from flzat_cognitive_pipeline.domain import (
+    CognitiveDecision,
     ContextItem,
     ContextSnapshot,
     OutcomeKind,
@@ -25,7 +27,7 @@ def canonical_json(value: dict[str, Any]) -> str:
     )
 
 
-def _command_id(task: TaskRecord) -> str:
+def _handoff_id(task: TaskRecord) -> str:
     return f"{task.task_id}-c01"
 
 
@@ -33,14 +35,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class TrustedCommandAssembler:
+class HighLevelHandoffAssembler:
+    """Build a grounded High-to-Low artifact without planning Low execution."""
+
     def __init__(
         self,
         *,
-        command_id_factory: Callable[[TaskRecord], str] = _command_id,
+        handoff_id_factory: Callable[[TaskRecord], str] = _handoff_id,
         clock: Callable[[], str] = _utc_now,
     ) -> None:
-        self._command_id_factory = command_id_factory
+        self._handoff_id_factory = handoff_id_factory
         self._clock = clock
 
     def assemble(
@@ -49,75 +53,76 @@ class TrustedCommandAssembler:
         outcome: ProcessedOutcome,
         snapshot: ContextSnapshot,
     ) -> tuple[str, str]:
-        if outcome.kind != OutcomeKind.READY_FOR_LOW or outcome.decision is None:
-            raise ValueError("only READY_FOR_LOW outcomes can become commands")
+        if outcome.kind != OutcomeKind.READY_FOR_LOW:
+            raise ValueError("only READY_FOR_LOW outcomes can become handoffs")
+        decision = outcome.decision
+        if not isinstance(decision, CognitiveDecision) or decision.goal is None:
+            raise ValueError("handoff requires a validated cognitive goal")
         if snapshot.request_id != task.request_id:
             raise ValueError("cannot assemble from a stale context snapshot")
-        decision = outcome.decision
-        selected = [snapshot.resolve(ref) for ref in decision.selected_context_refs]
-        target_item = self._select_target(selected, decision.target_name)
-        command_id = self._command_id_factory(task)
-        if not command_id.strip():
-            raise ValueError("command ID factory returned an empty value")
-
-        trusted_context: dict[str, Any] = {
-            "environment_id": snapshot.environment_id,
-            "map_id": snapshot.map_id,
-        }
-        if target_item is not None and target_item.scene:
-            trusted_context["room"] = target_item.scene
-        if decision.execution_strategy == "direct":
-            positioned = (
-                target_item
-                if target_item is not None and target_item.position is not None
-                else next(
-                    (item for item in selected if item.position is not None), None
-                )
-            )
-            if positioned is None:
-                raise ValueError("direct command has no trusted position")
-            trusted_context["position"] = positioned.position.as_dict()
-
-        target: dict[str, Any] = {
-            "type": decision.target_type,
-            "name": decision.target_name,
-        }
-        if target_item is not None:
-            target["memory_id"] = target_item.object_id
-        hints = self._semantic_hints(selected)
+        handoff_id = self._handoff_id_factory(task).strip()
+        if not handoff_id:
+            raise ValueError("handoff ID factory returned an empty value")
+        selected = [
+            snapshot.resolve(context_ref)
+            for context_ref in decision.goal.selected_context_refs
+        ]
         payload = {
-            "schema_version": "flzat.high_command.v2",
+            "schema_version": "flzat.high_handoff.v2",
+            "handoff_id": handoff_id,
+            "user_request": {
+                "original": task.original_transcript,
+                "clarifications": [
+                    {"question": question, "answer": answer}
+                    for question, answer in task.clarification_history
+                ],
+            },
+            "goal": {
+                "description": decision.goal.description,
+                "constraints": list(decision.goal.constraints),
+                "missing_information": list(decision.goal.missing_information),
+            },
+            "context": {
+                "environment_id": snapshot.environment_id,
+                "map_id": snapshot.map_id,
+                "source": "environment_memory",
+                "current_positions_confirmed": False,
+            },
+            "entities": [self._grounded_entity(item) for item in selected],
+        }
+        return handoff_id, canonical_json(payload)
+
+    def audit_record(
+        self, task: TaskRecord, handoff_id: str, snapshot: ContextSnapshot
+    ) -> dict[str, Any]:
+        """Retain full snapshot provenance locally, outside the Low payload."""
+        if snapshot.request_id != task.request_id:
+            raise ValueError("cannot audit a stale context snapshot")
+        return {
+            "schema_version": "flzat.handoff_audit.v1",
             "run_id": task.run_id,
-            "command_id": command_id,
             "task_id": task.task_id,
             "request_id": task.request_id,
+            "handoff_id": handoff_id,
             "created_at": self._clock(),
-            "intent": decision.intent,
-            "execution_mode": decision.execution_strategy,
-            "target": target,
-            "trusted_context": trusted_context,
-            "semantic_hints": hints,
-            "missing_information": [],
-            "context_refs": list(decision.selected_context_refs),
-            "status": "validated",
+            "snapshot": asdict(snapshot),
         }
-        return command_id, canonical_json(payload)
 
     @staticmethod
-    def _select_target(
-        selected: list[ContextItem], target_name: str
-    ) -> ContextItem | None:
-        normalized = target_name.casefold()
-        return next(
-            (item for item in selected if item.label.casefold() == normalized),
-            selected[0] if selected else None,
-        )
-
-    @staticmethod
-    def _semantic_hints(selected: list[ContextItem]) -> list[str]:
-        values: list[str] = []
-        for item in selected:
-            if item.scene:
-                values.append(f"scene:{item.scene}")
-            values.extend(item.relationships)
-        return list(dict.fromkeys(values))
+    def _grounded_entity(item: ContextItem) -> dict[str, Any]:
+        entity: dict[str, Any] = {
+            "id": item.object_id,
+            "label": item.label,
+        }
+        # Omit empty/exactly redundant fields, never guess which details matter.
+        if item.description and item.description.strip().casefold() != item.label.strip().casefold():
+            entity["description"] = item.description
+        if item.attributes:
+            entity["attributes"] = dict(item.attributes)
+        if item.relationships:
+            entity["relationships"] = list(item.relationships)
+        if item.scene:
+            entity["scene"] = item.scene
+        if item.position is not None:
+            entity["position"] = item.position.as_dict()
+        return entity

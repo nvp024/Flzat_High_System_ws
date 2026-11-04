@@ -17,11 +17,12 @@ class PipelineState(str, Enum):
     WAITING_CLARIFICATION = "WAITING_CLARIFICATION"
     RESPONSE_ONLY = "RESPONSE_ONLY"
     REJECTED = "REJECTED"
-    COMMAND_READY = "COMMAND_READY"
+    HANDOFF_READY = "HANDOFF_READY"
     WRITING_ARTIFACT = "WRITING_ARTIFACT"
-    PUBLISHING_COMMAND = "PUBLISHING_COMMAND"
-    DISPATCHED = "DISPATCHED"
+    HANDOFF_PENDING = "HANDOFF_PENDING"
+    HANDOFF_ACCEPTED = "HANDOFF_ACCEPTED"
     LOW_RUNNING = "LOW_RUNNING"
+    REFUSED = "REFUSED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -31,6 +32,7 @@ class PipelineState(str, Enum):
 TERMINAL_STATES = {
     PipelineState.RESPONSE_ONLY,
     PipelineState.REJECTED,
+    PipelineState.REFUSED,
     PipelineState.SUCCEEDED,
     PipelineState.FAILED,
     PipelineState.CANCELLED,
@@ -72,6 +74,11 @@ class MemoryCandidate:
     scene: str
     score: float
     position: TrustedPosition | None = None
+    attributes: tuple[tuple[str, str], ...] = ()
+    first_seen_ros_ns: int = 0
+    last_seen_ros_ns: int = 0
+    localization_quality: float = 0.0
+    confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +92,11 @@ class ContextItem:
     scene: str
     retrieval_score: float
     position: TrustedPosition | None = None
+    attributes: tuple[tuple[str, str], ...] = ()
+    first_seen_ros_ns: int = 0
+    last_seen_ros_ns: int = 0
+    localization_quality: float = 0.0
+    confidence: float = 0.0
 
     def prompt_value(self) -> dict[str, Any]:
         """Return model-visible semantics without trusted coordinates."""
@@ -93,9 +105,15 @@ class ContextItem:
             "kind": self.kind,
             "label": self.label,
             "description": self.description,
+            "attributes": {key: value for key, value in self.attributes},
             "relationships": list(self.relationships),
             "scene": self.scene,
             "has_position": self.position is not None,
+            "first_seen_ros_ns": self.first_seen_ros_ns,
+            "last_seen_ros_ns": self.last_seen_ros_ns,
+            "localization_quality": round(self.localization_quality, 6),
+            "confidence": round(self.confidence, 6),
+            "source": "environment_memory",
             "retrieval_score": round(self.retrieval_score, 6),
         }
 
@@ -120,21 +138,36 @@ class ContextSnapshot:
 
 
 @dataclass(frozen=True)
-class ModelDecision:
-    intent: str
-    target_type: str
-    target_name: str
+class CognitiveGoal:
+    """Natural-language objective produced by High, not an execution plan."""
+
+    description: str
+    constraints: tuple[str, ...]
     selected_context_refs: tuple[str, ...]
-    execution_strategy: str
     missing_information: tuple[str, ...]
-    clarification_question: str | None
+
+
+@dataclass(frozen=True)
+class CognitiveInteraction:
+    """One High-owned request for clarification."""
+
+    kind: str
+    question: str
+
+
+@dataclass(frozen=True)
+class CognitiveDecision:
+    """Unified companion decision: speech, an optional goal, or clarification."""
+
     speech: str
+    goal: CognitiveGoal | None
+    interaction: CognitiveInteraction | None
 
 
 @dataclass(frozen=True)
 class ProcessedOutcome:
     kind: OutcomeKind
-    decision: ModelDecision | None = None
+    decision: CognitiveDecision | None = None
     error: str = ""
 
 
@@ -152,11 +185,11 @@ class TaskRecord:
     request_id: str
     original_transcript: str
     latest_transcript: str
-    mode: str = "task_command"
+    mode: str = "cognitive"
     state: PipelineState = PipelineState.NEW
     clarification_history: list[tuple[str, str]] = field(default_factory=list)
     pending_question: str = ""
-    command_id: str = ""
+    handoff_id: str = ""
     transitions: list[TransitionEvent] = field(default_factory=list)
 
     @property

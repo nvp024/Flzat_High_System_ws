@@ -1,0 +1,3 @@
+Respond to english_transcript using the relevant runtime context. Keep speech
+and any goal consistent with the user's meaning. Return the decision using the
+schema below.

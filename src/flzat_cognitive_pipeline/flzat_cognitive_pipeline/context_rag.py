@@ -73,6 +73,11 @@ class ContextRagManager:
                 scene=candidate.scene.strip(),
                 retrieval_score=float(candidate.score),
                 position=candidate.position,
+                attributes=tuple(candidate.attributes),
+                first_seen_ros_ns=candidate.first_seen_ros_ns,
+                last_seen_ros_ns=candidate.last_seen_ros_ns,
+                localization_quality=float(candidate.localization_quality),
+                confidence=float(candidate.confidence),
             )
             item_size = len(str(item.prompt_value()))
             if items and used_characters + item_size > self.max_context_characters:
@@ -120,3 +125,17 @@ class ContextRagManager:
                 math.isfinite(value) for value in (position.x, position.y, position.z)
             ):
                 raise ValueError("trusted position must be finite in map frame")
+        if candidate.first_seen_ros_ns < 0 or candidate.last_seen_ros_ns < 0:
+            raise ValueError("observation timestamps cannot be negative")
+        if (
+            candidate.first_seen_ros_ns
+            and candidate.last_seen_ros_ns
+            and candidate.first_seen_ros_ns > candidate.last_seen_ros_ns
+        ):
+            raise ValueError("first observation cannot be newer than last observation")
+        for name, value in (
+            ("localization_quality", candidate.localization_quality),
+            ("confidence", candidate.confidence),
+        ):
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and between 0 and 1")

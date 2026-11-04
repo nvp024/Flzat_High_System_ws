@@ -51,9 +51,9 @@ def test_invalid_transition_and_duplicate_command_are_rejected():
     with pytest.raises(TaskStateError, match="invalid transition"):
         current.transition(task, PipelineState.VLM_ACTIVE, "skip")
 
-    current.mark_command(task, "task-0001-c01")
+    current.mark_handoff(task, "task-0001-c01")
     with pytest.raises(TaskStateError, match="already owns"):
-        current.mark_command(task, "task-0001-c02")
+        current.mark_handoff(task, "task-0001-c02")
 
 
 def test_task_sequence_is_readable_and_scoped_to_the_run():
@@ -94,9 +94,9 @@ def test_clarification_limit_is_enforced():
         current.accept_transcript("on the table", resume=True)
 
 
-def test_route_mode_is_stored_and_canonicalized_on_resume():
+def test_clarification_resume_keeps_the_unified_cognitive_mode():
     current = store()
-    task = current.accept_transcript("get that", "clarification")
+    task = current.accept_transcript("get that")
     for state in (
         PipelineState.PROMPT_READY,
         PipelineState.VLM_QUEUED,
@@ -106,9 +106,9 @@ def test_route_mode_is_stored_and_canonicalized_on_resume():
         current.transition(task, state, "test")
     current.wait_for_clarification(task, "Which object?")
 
-    resumed = current.accept_transcript("the book", "task_command", resume=True)
+    resumed = current.accept_transcript("the book", resume=True)
 
-    assert resumed.mode == "task_command"
+    assert resumed.mode == "cognitive"
     assert resumed.task_id == task.task_id
 
 

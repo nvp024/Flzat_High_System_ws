@@ -1,4 +1,4 @@
-"""Opt-in live ROS action/topic check with the production manager and fake VLM."""
+"""Opt-in live ROS check for the Step 1 unified cognitive ingress."""
 
 import json
 import os
@@ -15,24 +15,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_routing_continuation_and_topic_switch_over_ros(tmp_path):
+def test_direct_text_reaches_one_cognitive_inference_without_router(tmp_path):
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
     from rclpy.parameter import Parameter
     from std_msgs.msg import String
-    from flzat_high_interfaces.msg import RoutedCommand
     from flzat_cognitive_pipeline.cognitive_manager import CognitiveManagerNode
     from flzat_cognitive_pipeline.domain import PipelineState
     from flzat_high_bringup.fake_servers import FakeVlmServer
 
     package = Path(__file__).resolve().parents[2] / "flzat_cognitive_pipeline"
     params = {
-        "environment_id": "demo", "map_id": "map", "output_root": str(tmp_path),
+        "environment_id": "demo",
+        "map_id": "map",
+        "output_root": str(tmp_path),
         "prompt_directory": str(package / "prompts"),
-        "context_policy_path": str(package / "config/intent_routes.yaml"),
-        "skill_registry_path": str(package / "config/skill_registry.yaml"),
         "safety_policy_path": str(package / "config/safety_policy.yaml"),
         "user_profile_path": str(package / "config/user_profile.yaml"),
+        "enable_text_command": True,
     }
     args = ["--ros-args"]
     for name, value in params.items():
@@ -44,14 +44,24 @@ def test_routing_continuation_and_topic_switch_over_ros(tmp_path):
     try:
         manager = CognitiveManagerNode()
         fake = FakeVlmServer()
-        probe = rclpy.create_node("routing_test_probe")
+        fake.set_parameters(
+            [
+                Parameter(
+                    "response_text",
+                    value=json.dumps(
+                        {
+                            "speech": "Tokyo is the capital of Japan.",
+                            "goal": None,
+                            "interaction": None,
+                        }
+                    ),
+                )
+            ]
+        )
+        probe = rclpy.create_node("cognitive_ingress_test_probe")
         nodes.extend([manager, fake, probe])
         publisher = probe.create_publisher(
-            RoutedCommand, "/flzat/high_system/routed_command", 10,
-        )
-        commands = []
-        probe.create_subscription(
-            String, "/flzat/high_system/command", lambda msg: commands.append(msg.data), 10,
+            String, "/flzat/high_system/text_command", 10
         )
         seen = []
         execute = fake._server._execute_callback
@@ -72,52 +82,27 @@ def test_routing_continuation_and_topic_switch_over_ros(tmp_path):
                 if predicate():
                     return
                 time.sleep(0.02)
-            raise AssertionError("ROS routing integration timed out")
+            raise AssertionError("ROS cognitive integration timed out")
 
-        def routing(mode, relation, question=None):
-            value = json.dumps({
-                "mode": mode, "relation_to_pending": relation,
-                "needs_clarification": question is not None,
-                "clarification_question": question,
-            })
-            fake.set_parameters([Parameter("routing_response_text", value=value)])
+        wait_for(
+            lambda: publisher.get_subscription_count() > 0
+            and manager._vlm_client.server_is_ready()
+        )
+        publisher.publish(String(data="What is the capital of Japan?"))
+        wait_for(
+            lambda: manager._tasks._task_count >= 1
+            and manager._tasks.get("task-0001").state
+            == PipelineState.RESPONSE_ONLY
+        )
 
-        def send(text, mode="clarification"):
-            message = RoutedCommand()
-            message.utterance, message.mode = text, mode
-            message.confidence = 0.3
-            publisher.publish(message)
-
-        fake.set_parameters([Parameter("response_text", value=json.dumps({
-            "reply": "Scripted answer.", "speak": True, "requires_robot_action": False,
-        }))])
-        wait_for(lambda: publisher.get_subscription_count() > 0
-                 and manager._vlm_client.server_is_ready())
-        routing("general_qa", "new_request", "Which country do you mean?")
-        send("Who is the president?")
-        wait_for(lambda: manager._tasks.waiting_task_id == "task-0001")
-        routing("general_qa", "continue")
-        send("America")
-        wait_for(lambda: manager._tasks.get("task-0001").state == PipelineState.RESPONSE_ONLY)
-        assert len(seen) == 3  # routing, continuation routing, main inference
-        runtime = json.loads(seen[-1].user_prompt.split("RUNTIME_INPUT_JSON\n")[1])
-        assert runtime["english_transcript"] == "Who is the president?"
-        assert runtime["dialogue_history"][0]["answer"] == "America"
-        assert not any(goal.image.data for goal in seen)
-
-        routing("general_qa", "new_request", "Which country do you mean?")
-        send("Who is the president?")
-        wait_for(lambda: manager._tasks.waiting_task_id == "task-0002")
-        routing("general_qa", "new_request")
-        send("What is the capital of Japan?", "general_qa")
-        wait_for(lambda: manager._tasks._task_count == 3
-                 and manager._tasks.get("task-0003").state == PipelineState.RESPONSE_ONLY)
-        runtime = json.loads(seen[-1].user_prompt.split("RUNTIME_INPUT_JSON\n")[1])
+        assert len(seen) == 1
+        runtime = json.loads(seen[0].user_prompt.split("RUNTIME_INPUT_JSON\n", 1)[1])
         assert runtime["english_transcript"] == "What is the capital of Japan?"
-        assert "dialogue_history" not in runtime
-        assert not commands
-        # No camera, RAG, or TTS server was started: QA still completes.
-        assert list(tmp_path.rglob("resolved_routing.json"))
+        assert "router_mode" not in runtime
+        assert runtime["context_availability"]["memory"]["status"] == "unavailable"
+        assert runtime["context_availability"]["vision"]["status"] == "unavailable"
+        assert not seen[0].image.data
+        assert not list(tmp_path.rglob("resolved_routing.json"))
     finally:
         executor.shutdown(timeout_sec=5)
         if thread:

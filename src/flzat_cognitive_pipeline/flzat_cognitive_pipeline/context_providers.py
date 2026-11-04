@@ -1,4 +1,4 @@
-"""Trusted, bounded context providers selected by ContextPolicy."""
+"""Trusted, bounded context providers for the unified cognitive request."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any
 
 import yaml
 
-from flzat_cognitive_pipeline.context_policy import ContextRequirements
 from flzat_cognitive_pipeline.conversation_store import ConversationStore
 from flzat_cognitive_pipeline.domain import ContextSnapshot, TaskRecord
 
@@ -67,43 +66,42 @@ class AdaptiveContextBuilder:
     def __init__(
         self,
         *,
-        skill_registry: TrustedYamlProvider,
         safety_policy: TrustedYamlProvider,
         user_profile: TrustedYamlProvider,
         conversation_store: ConversationStore,
     ) -> None:
-        self._skills = skill_registry
         self._safety = safety_policy
         self._profile = user_profile
         self._conversation = conversation_store
 
-    def build(
+    def build_cognitive(
         self,
-        policy: ContextRequirements,
         task: TaskRecord,
         snapshot: ContextSnapshot,
     ) -> AdaptiveContext:
-        trusted: dict[str, Any] = {}
-        if policy.mode in {"task_command", "social_dialogue"}:
-            trusted["skill_registry"] = self._skills.get()
-        if policy.mode == "task_command":
-            trusted["safety_policy"] = self._safety.get()
-        if policy.needs_user_profile:
-            trusted["user_profile"] = self._profile.get()
+        """Build the single VLM context without pre-classifying the request."""
 
-        dialogue: list[dict[str, str]] = []
-        if policy.needs_conversation_memory and policy.mode == "clarification":
-            dialogue.extend(self._conversation.recent())
-        # Explicit clarification belongs to this request, not general chat history.
+        dialogue = self._conversation.recent()
         dialogue.extend(
             {"question": question, "answer": answer}
             for question, answer in task.clarification_history
         )
         return AdaptiveContext(
-            mode=policy.mode,
+            mode="cognitive",
             context_items=[item.prompt_value() for item in snapshot.items],
             context_refs=snapshot.refs,
             dialogue_history=dialogue,
-            trusted_context=trusted,
-            include_rag_context=policy.needs_task_memory,
+            trusted_context={
+                "safety_policy": self._safety.get(),
+                "user_profile": self._profile.get(),
+                "high_low_boundary": {
+                    "high_responsibility": (
+                        "understand the user and hand off a natural-language goal"
+                    ),
+                    "low_responsibility": (
+                        "classify, plan, select skills, and execute the goal"
+                    ),
+                },
+            },
+            include_rag_context=True,
         )

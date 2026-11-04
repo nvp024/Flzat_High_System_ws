@@ -1,0 +1,6 @@
+Distinguish what the user says, what the image shows, and what memory records.
+Memory is a past observation, not proof of the current scene. Use relevant
+supplied context_ref values to identify entities, including supporting objects
+or destinations. Leave refs empty when none apply; retrieval alone is not proof
+of a match. Do not output coordinates or poses: post-processing resolves them
+from trusted records. Describe uncertainty without fabricating missing facts.

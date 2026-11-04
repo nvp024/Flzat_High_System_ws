@@ -54,27 +54,19 @@ class FakeVlmServer(Node):
         super().__init__("fake_vlm_server")
         self.declare_parameter(
             "response_text",
-            '{"intent":"fetch_object","target":{"type":"object",'
-            '"name":"water_cup"},"selected_context_refs":[],"execution_strategy":'
-            '"search","missing_information":[],"clarification_question":null,'
-            '"speech":"I will search for the water cup."}',
+            '{"speech":"I will ask the robot to find the water cup.",'
+            '"goal":{"description":"Find the water cup requested by the user",'
+            '"constraints":[],"selected_context_refs":[],'
+            '"missing_information":["current water cup location"]},'
+            '"interaction":null}',
         )
         self.declare_parameter("delay_s", 0.0)
         self.declare_parameter("fail", False)
         self.declare_parameter("ignore_cancel", False)
         self.declare_parameter("response_sequence", [""])
         self.declare_parameter("second_response_text", "")
-        # Routing has its own fixtures so it cannot consume a main/repair response.
-        self.declare_parameter(
-            "routing_response_text",
-            '{"mode":null,"relation_to_pending":"new_request",'
-            '"needs_clarification":true,'
-            '"clarification_question":"Could you clarify your request?"}',
-        )
-        self.declare_parameter("routing_response_sequence", [""])
         self._response_lock = threading.Lock()
         self._response_index = 0
-        self._routing_response_index = 0
         self._server = ActionServer(
             self,
             RunVlm,
@@ -121,30 +113,13 @@ class FakeVlmServer(Node):
             result.error_message = "configured fake failure"
             return result
         result.success = True
-        result.response_text = (
-            self._next_routing_response()
-            if result.request_id.endswith("-routing")
-            else self._next_response()
-        )
+        result.response_text = self._next_response()
         result.error_message = ""
         if goal_handle.is_cancel_requested:
             goal_handle.abort()
         else:
             goal_handle.succeed()
         return result
-
-    def _next_routing_response(self) -> str:
-        """Return configured classifier fixtures, without pretending to classify."""
-        sequence = tuple(
-            str(value) for value in self.get_parameter("routing_response_sequence").value
-            if str(value).strip()
-        )
-        with self._response_lock:
-            if not sequence:
-                return str(self.get_parameter("routing_response_text").value)
-            index = min(self._routing_response_index, len(sequence) - 1)
-            self._routing_response_index += 1
-            return sequence[index]
 
     def _next_response(self) -> str:
         sequence = tuple(
@@ -179,6 +154,7 @@ class FakeVlmServer(Node):
 class FakeTtsServer(Node):
     def __init__(self) -> None:
         super().__init__("fake_tts_server")
+        self.declare_parameter("delay_s", 0.0)
         self._server = ActionServer(
             self,
             TextToSpeech,
@@ -197,13 +173,17 @@ class FakeTtsServer(Node):
             else GoalResponse.REJECT
         )
 
-    @staticmethod
-    def _execute(goal_handle):
+    def _execute(self, goal_handle):
         result = TextToSpeech.Result()
-        if goal_handle.is_cancel_requested:
-            goal_handle.canceled()
-            result.success = False
-            return result
+        deadline = time.monotonic() + max(
+            0.0, float(self.get_parameter("delay_s").value)
+        )
+        while time.monotonic() < deadline:
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result.success = False
+                return result
+            time.sleep(min(0.01, deadline - time.monotonic()))
         goal_handle.succeed()
         result.success = True
         return result

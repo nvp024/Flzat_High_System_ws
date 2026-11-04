@@ -8,12 +8,12 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 from builtin_interfaces.msg import Time
 from action_msgs.msg import GoalStatus
 
 import rclpy
-from rclpy.action import ActionClient
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -21,19 +21,16 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from flzat_high_interfaces.action import RunVlm, TextToSpeech
-from flzat_high_interfaces.msg import RoutedCommand
+from flzat_high_interfaces.action import AskUser, HandleIntent, RunVlm, TextToSpeech
+from flzat_high_interfaces.msg import SpeechTranscript
 from flzat_high_interfaces.srv import GetFrameNear, QueryMemory
 from flzat_cognitive_pipeline.artifacts import (
-    CommandArtifactWriter,
+    HandoffArtifactWriter,
     RequestArtifactWriter,
 )
-from flzat_cognitive_pipeline.command import TrustedCommandAssembler, canonical_json
-from flzat_cognitive_pipeline.context_policy import (
-    ContextPolicy,
-    ContextPolicyError,
-    ContextRequirements,
-    ROUTE_MODES,
+from flzat_cognitive_pipeline.command import (
+    HighLevelHandoffAssembler,
+    canonical_json,
 )
 from flzat_cognitive_pipeline.context_providers import (
     AdaptiveContextBuilder,
@@ -51,16 +48,20 @@ from flzat_cognitive_pipeline.domain import (
     TrustedPosition,
 )
 from flzat_cognitive_pipeline.output_validator import (
-    ModeOutputValidator,
+    CognitiveOutputValidator,
     RepairPolicy,
-    ValidatedModeOutput,
+    ValidatedCognitiveOutput,
+)
+from flzat_cognitive_pipeline.interaction import (
+    ASK_USER_KINDS,
+    ASK_USER_LISTENING_KINDS,
+    HANDLE_INTENT_OUTCOMES,
+    HANDLE_INTENT_STAGES,
+    assess_user_answer,
+    is_stop_command,
+    validate_safe_identifier,
 )
 from flzat_cognitive_pipeline.prompt_composer import ComposedPrompt, PromptComposer
-from flzat_cognitive_pipeline.routing import (
-    LowStatusAdapter,
-    build_low_cancel,
-)
-from flzat_cognitive_pipeline.semantic_routing import parse_semantic_route
 from flzat_cognitive_pipeline.task_store import TaskRunStore, TaskStateError
 from flzat_cognitive_pipeline.telemetry import PipelineTelemetry
 from flzat_cognitive_pipeline.transcript import is_usable_transcript
@@ -70,17 +71,37 @@ from flzat_cognitive_pipeline.transcript import is_usable_transcript
 class RuntimeRequest:
     task: TaskRecord
     deadline_ns: int
-    policy: ContextRequirements
-    router_record: dict[str, object]
+    input_record: dict[str, object]
     snapshot: ContextSnapshot | None = None
     prompt: ComposedPrompt | None = None
     base_prompt: ComposedPrompt | None = None
     frame: CompressedImage | None = None
     attempts_sent: int = 0
     vlm_goal_handle: object | None = None
-    routing_pending: dict[str, object] | None = None
-    routing_stage: bool = False
     input_stamp: Time | None = None
+    context_availability: dict[str, dict[str, object]] | None = None
+    handoff_id: str = ""
+    handoff_path: str = ""
+    handoff_goal_handle: object | None = None
+    handoff_cancel_requested: bool = False
+
+
+@dataclass
+class UserInteractionSession:
+    goal_handle: object
+    run_id: str
+    task_id: str
+    handoff_id: str
+    interaction_id: str
+    kind: str
+    content_hint: str
+    options: tuple[str, ...]
+    deadline_ns: int
+    answer_event: threading.Event
+    answer: str = ""
+    interrupted_error: str = ""
+    listening: bool = False
+    repeat_count: int = 0
 
 
 class CognitiveManagerNode(Node):
@@ -104,10 +125,19 @@ class CognitiveManagerNode(Node):
         )
         if self._request_timeout_ns <= 0:
             raise ValueError("request_timeout_s must be positive")
+        self._high_clarification_timeout_ns = int(
+            float(self.get_parameter("high_clarification_timeout_s").value)
+            * 1_000_000_000
+        )
+        if self._high_clarification_timeout_ns <= 0:
+            raise ValueError("high_clarification_timeout_s must be positive")
+        self._interaction_max_reprompts = int(
+            self.get_parameter("interaction_max_reprompts").value
+        )
+        if self._interaction_max_reprompts < 0:
+            raise ValueError("interaction_max_reprompts cannot be negative")
         if float(self.get_parameter("health_period_s").value) <= 0.0:
             raise ValueError("health_period_s must be positive")
-        self._routed_topic = self._text_parameter("routed_command_topic")
-
         self._tasks = TaskRunStore(
             max_clarifications=int(self.get_parameter("max_clarifications").value)
         )
@@ -119,18 +149,11 @@ class CognitiveManagerNode(Node):
             minimum_score=float(self.get_parameter("rag_minimum_score").value),
         )
         self._prompts = PromptComposer(self._text_parameter("prompt_directory"))
-        self._context_policy = ContextPolicy.from_yaml(
-            self._trusted_config_path("context_policy_path", "intent_routes.yaml")
-        )
         self._conversation = ConversationStore(
             max_turns=int(self.get_parameter("conversation_max_turns").value),
             max_text_characters=int(
                 self.get_parameter("conversation_max_characters").value
             ),
-        )
-        skill_registry = TrustedYamlProvider(
-            self._trusted_config_path("skill_registry_path", "skill_registry.yaml"),
-            "skills",
         )
         safety_policy = TrustedYamlProvider(
             self._trusted_config_path("safety_policy_path", "safety_policy.yaml"),
@@ -141,31 +164,28 @@ class CognitiveManagerNode(Node):
             "user_profile",
         )
         self._adaptive_context = AdaptiveContextBuilder(
-            skill_registry=skill_registry,
             safety_policy=safety_policy,
             user_profile=user_profile,
             conversation_store=self._conversation,
         )
-        skills = skill_registry.get()
-        allowed_skills = [
-            item.get("name", "")
-            for item in skills
-            if isinstance(item, dict)
-        ]
-        self._validator = ModeOutputValidator(allowed_skills)
+        self._validator = CognitiveOutputValidator()
         self._repair_policy = RepairPolicy(
             int(self.get_parameter("max_repair_attempts").value)
         )
-        self._assembler = TrustedCommandAssembler()
+        self._assembler = HighLevelHandoffAssembler()
         output_root = Path(self._text_parameter("output_root"))
-        self._writer = CommandArtifactWriter(output_root)
+        self._writer = HandoffArtifactWriter(output_root)
         self._request_writer = RequestArtifactWriter(output_root)
-        self._low_status = LowStatusAdapter()
         self._telemetry = PipelineTelemetry(self._tasks.run_id)
         self._started_ns = time.monotonic_ns()
         self._active: RuntimeRequest | None = None
         self._dispatched: dict[str, TaskRecord] = {}
+        self._handoff_paths: dict[str, str] = {}
         self._success_speech: dict[str, str] = {}
+        self._interaction: UserInteractionSession | None = None
+        self._interaction_reserved = False
+        self._interaction_reservation_deadline_ns = 0
+        self._waiting_deadlines: dict[str, int] = {}
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -179,9 +199,6 @@ class CognitiveManagerNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self._command_pub = self.create_publisher(
-            String, self._text_parameter("command_topic"), qos
-        )
         self._status_pub = self.create_publisher(
             String, "/flzat/high_system/status", status_qos
         )
@@ -191,27 +208,26 @@ class CognitiveManagerNode(Node):
         self._metrics_pub = self.create_publisher(
             String, "/flzat/high_system/metrics", qos
         )
-        self._low_cancel_pub = self.create_publisher(
-            String, self._text_parameter("low_cancel_topic"), qos
-        )
-        self._routed_sub = self.create_subscription(
-            RoutedCommand,
-            self._routed_topic,
-            self._on_routed_command,
+        self._stt_sub = self.create_subscription(
+            SpeechTranscript,
+            "/flzat/high_system/stt_result",
+            self._on_stt_result,
             qos,
             callback_group=self._cb_group,
         )
+        self._text_sub = None
+        if bool(self.get_parameter("enable_text_command").value):
+            self._text_sub = self.create_subscription(
+                String,
+                "/flzat/high_system/text_command",
+                self._on_text_command,
+                qos,
+                callback_group=self._cb_group,
+            )
         self._cancel_sub = self.create_subscription(
             String,
             "/flzat/high_system/cancel",
             self._on_cancel,
-            qos,
-            callback_group=self._cb_group,
-        )
-        self._low_sub = self.create_subscription(
-            String,
-            self._text_parameter("low_status_topic"),
-            self._on_low_status,
             qos,
             callback_group=self._cb_group,
         )
@@ -221,10 +237,26 @@ class CognitiveManagerNode(Node):
         self._tts_client = ActionClient(
             self, TextToSpeech, "/tts_action", callback_group=self._cb_group
         )
+        self._intent_client = ActionClient(
+            self,
+            HandleIntent,
+            "/llm/handle_intent",
+            callback_group=self._cb_group,
+        )
+        self._ask_user_server = ActionServer(
+            self,
+            AskUser,
+            "/brain/ask_user",
+            execute_callback=self._execute_ask_user,
+            goal_callback=self._on_ask_user_goal,
+            cancel_callback=self._on_ask_user_cancel,
+            callback_group=self._cb_group,
+        )
         self._speech_serial = 0
         self._speech_busy = False
         self._speech_handle = None
         self._speech_pending = None
+        self._speech_completion: Callable[[bool, str], None] | None = None
         self._speech_deadline = 0.0
         self._speech_timeout_s = float(self.get_parameter("tts_timeout_s").value)
         if not math.isfinite(self._speech_timeout_s) or self._speech_timeout_s <= 0:
@@ -251,12 +283,7 @@ class CognitiveManagerNode(Node):
         )
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter(
-            "routed_command_topic", "/flzat/high_system/routed_command"
-        )
-        self.declare_parameter("command_topic", "/flzat/high_system/command")
-        self.declare_parameter("low_status_topic", "/flzat/low_system/status")
-        self.declare_parameter("low_cancel_topic", "/flzat/low_system/cancel")
+        self.declare_parameter("enable_text_command", False)
         self.declare_parameter("environment_id", "")
         self.declare_parameter("map_id", "")
         self.declare_parameter("rag_top_k", 5)
@@ -266,97 +293,86 @@ class CognitiveManagerNode(Node):
         self.declare_parameter("conversation_max_turns", 5)
         self.declare_parameter("conversation_max_characters", 1000)
         self.declare_parameter("max_clarifications", 3)
+        self.declare_parameter("interaction_max_reprompts", 2)
+        self.declare_parameter("high_clarification_timeout_s", 60.0)
         self.declare_parameter("max_repair_attempts", 2)
         self.declare_parameter("request_timeout_s", 60.0)
         self.declare_parameter("health_period_s", 2.0)
         self.declare_parameter("tts_timeout_s", 65.0)
         self.declare_parameter("prompt_directory", "")
-        self.declare_parameter("context_policy_path", "")
-        self.declare_parameter("skill_registry_path", "")
         self.declare_parameter("safety_policy_path", "")
         self.declare_parameter("user_profile_path", "")
         self.declare_parameter(
-            "output_root", "~/.local/share/flzat/high_system/commands"
+            "output_root", "~/.local/share/flzat/high_system/handoffs"
         )
         self.declare_parameter(
             "rejection_speech", "I could not safely process that request."
         )
 
-    def _on_routed_command(self, message: RoutedCommand) -> None:
-        transcript = message.utterance.strip()
-        if not is_usable_transcript(transcript):
-            self.get_logger().warn("Ignored routed command without a usable utterance.")
+    def _on_stt_result(self, message: SpeechTranscript) -> None:
+        self._ingest_cognitive_input(
+            message.transcript,
+            source="stt",
+            input_stamp=message.header.stamp,
+        )
+
+    def _on_text_command(self, message: String) -> None:
+        self._ingest_cognitive_input(message.data, source="text")
+
+    def _ingest_cognitive_input(
+        self,
+        transcript: str,
+        *,
+        source: str,
+        input_stamp: Time | None = None,
+    ) -> None:
+        value = transcript.strip()
+        if not is_usable_transcript(value):
+            self.get_logger().warn("Ignored input without a usable transcript.")
             return
-        if (
-            len(message.route_names) != len(message.route_scores)
-            or not math.isfinite(float(message.confidence))
-            or not math.isfinite(float(message.latency_ms))
-        ):
-            self.get_logger().warn("Ignored malformed routed command metadata.")
-            return
-        if message.mode == "safety_stop":
-            # The router also publishes the canonical high-level cancel event.
-            return
-        if message.mode not in ROUTE_MODES:
-            self.get_logger().warn("Ignored unsupported routed command mode.")
+        if is_stop_command(value):
+            self._on_cancel(String(data=""))
             return
         with self._lock:
-            waiting_id = self._tasks.waiting_task_id
-            waiting = self._tasks.get(waiting_id) if waiting_id else None
-        needs_routing = waiting is not None or message.mode == "clarification"
-        proposed_flags = {
-            "needs_vision": bool(message.needs_vision),
-            "needs_task_memory": bool(message.needs_task_memory),
-            "needs_conversation_memory": bool(message.needs_conversation_memory),
-            "needs_user_profile": bool(message.needs_user_profile),
-            "needs_external_knowledge": bool(message.needs_external_knowledge),
-        }
-        try:
-            policy = self._context_policy.resolve(
-                "clarification" if needs_routing else message.mode,
-                proposed_flags,
-            )
-        except ContextPolicyError as exc:
-            self.get_logger().warn(f"Routed command rejected by context policy: {exc}")
-            return
-        if policy.corrected_flags and not needs_routing:
-            self.get_logger().warn(
-                "ContextPolicy corrected untrusted router flags: "
-                + ", ".join(policy.corrected_flags)
-            )
+            interaction = self._interaction
+            if interaction is not None and interaction.listening:
+                interaction.answer = value
+                interaction.listening = False
+                interaction.answer_event.set()
+                self.get_logger().info(
+                    f"[INTERACTION] {interaction.interaction_id}: answer received"
+                )
+                return
+            busy_reason = ""
+            if interaction is not None or self._interaction_reserved:
+                busy_reason = "user_interaction_active"
+            elif self._active is not None:
+                busy_reason = "cognitive_request_active"
+            elif self._speech_busy:
+                busy_reason = "tts_active"
+            if busy_reason:
+                self._publish_busy(
+                    event="input_rejected",
+                    reason=busy_reason,
+                    input_id=source,
+                )
+                return
         self._accept_transcript(
-            transcript,
-            f"intent_router:{message.mode}",
-            policy,
+            value,
+            source,
             {
-                "schema_version": "flzat.router_record.v1",
-                "router_version": message.router_version,
-                "routed_mode": message.mode,
-                "effective_mode": policy.mode,
-                "confidence": float(message.confidence),
-                "language": message.language,
-                "urgency": message.urgency,
-                "route_scores": {
-                    name: float(score)
-                    for name, score in zip(
-                        message.route_names,
-                        message.route_scores,
-                    )
-                },
-                "latency_ms": float(message.latency_ms),
+                "schema_version": "flzat.cognitive_input.v1",
+                "source": source,
             },
-            needs_routing=needs_routing,
-            input_stamp=message.header.stamp,
+            input_stamp=input_stamp,
         )
 
     def _accept_transcript(
         self,
         transcript: str,
         source: str,
-        policy: ContextRequirements,
-        router_record: dict[str, object],
+        input_record: dict[str, object],
         *,
-        needs_routing: bool = False,
         input_stamp: Time | None = None,
     ) -> None:
         with self._lock:
@@ -365,36 +381,32 @@ class CognitiveManagerNode(Node):
                 return
             try:
                 waiting_id = self._tasks.waiting_task_id
-                pending = None
-                if waiting_id:
-                    waiting = self._tasks.get(waiting_id)
-                    pending = {
-                        "original_transcript": waiting.original_transcript,
-                        "mode": (
-                            None if waiting.mode == "clarification" else waiting.mode
-                        ),
-                        "clarification_history": [
-                            {"question": q, "answer": a}
-                            for q, a in waiting.clarification_history
-                        ],
-                        "pending_question": waiting.pending_question,
-                    }
                 task = self._tasks.accept_transcript(
-                    transcript, policy.mode,
-                    resume=needs_routing and bool(waiting_id),
-                    defer_clarification=needs_routing,
+                    transcript,
+                    resume=bool(waiting_id),
                 )
             except (ValueError, TaskStateError) as exc:
+                if waiting_id and "clarification limit reached" in str(exc):
+                    waiting = self._tasks.get(waiting_id)
+                    self._tasks.force_terminal(
+                        waiting,
+                        PipelineState.REJECTED,
+                        "UNRESOLVED_ANSWER",
+                    )
+                    self._waiting_deadlines.pop(waiting.task_id, None)
+                    self._publish_status(waiting, "UNRESOLVED_ANSWER")
                 self.get_logger().warn(f"Transcript rejected: {exc}")
                 return
+            self._waiting_deadlines.pop(task.task_id, None)
             runtime = RuntimeRequest(
                 task=task,
                 deadline_ns=time.monotonic_ns() + self._request_timeout_ns,
-                policy=policy,
-                router_record=router_record,
-                routing_pending=pending,
-                routing_stage=needs_routing,
+                input_record=input_record,
                 input_stamp=input_stamp,
+                context_availability={
+                    "memory": {"status": "pending", "reason": ""},
+                    "vision": {"status": "pending", "reason": ""},
+                },
             )
             self._telemetry.begin(task.request_id, task.task_id, source)
             self._active = runtime
@@ -408,181 +420,18 @@ class CognitiveManagerNode(Node):
             if not self._is_current(runtime):
                 return
             self._publish_status(task, source)
-        if needs_routing:
-            self._start_routing(runtime)
-            return
-        if policy.needs_task_memory:
-            self._query_memory(runtime)
-        else:
-            self._prepare_prompt(runtime, self._empty_snapshot(task.request_id))
-
-    def _start_routing(self, runtime: RuntimeRequest) -> None:
-        """Use the existing VLM server for text-only classification before context."""
-        try:
-            with self._lock:
-                if not self._is_current(runtime):
-                    return
-                if not self._vlm_client.server_is_ready():
-                    self._reject(runtime, "VLM routing action server is unavailable")
-                    return
-                prompt = self._prompts.compose_routing(
-                    runtime.task.latest_transcript, runtime.routing_pending,
-                )
-                task = runtime.task
-                goal = RunVlm.Goal()
-                goal.request_id = task.request_id + "-routing"
-                goal.transcript = task.latest_transcript
-                goal.system_prompt = prompt.system_prompt
-                goal.user_prompt = prompt.user_prompt
-                goal.prompt_version = prompt.version
-                goal.prompt_hash = prompt.prompt_hash
-                self._request_writer.write_text(
-                    task.run_id, task.task_id, task.request_id,
-                    "routing_prompt.txt",
-                    prompt.system_prompt + "\n\n" + prompt.user_prompt,
-                )
-                self._tasks.transition(
-                    task, PipelineState.PROMPT_READY, "routing prompt"
-                )
-                self._tasks.transition(
-                    task, PipelineState.VLM_QUEUED, "routing queued"
-                )
-                self.get_logger().info(f"[ROUTING] {task.task_id}: Qwen classification")
-                # Capture identifiers now; task.request_id can change on later turns.
-                task_id, request_id = task.task_id, task.request_id
-                future = self._vlm_client.send_goal_async(goal)
-                future.add_done_callback(
-                    lambda done: self._on_routing_goal(task_id, request_id, done)
-                )
-        except Exception as exc:
-            self._reject(runtime, f"routing dispatch failed: {exc}")
-
-    def _on_routing_goal(self, task_id: str, request_id: str, future) -> None:
-        runtime = self._current(task_id, request_id)
-        try:
-            handle = future.result()
-            with self._lock:
-                if (
-                    runtime is None or not self._is_current(runtime)
-                    or not runtime.routing_stage
-                ):
-                    if handle.accepted:
-                        handle.cancel_goal_async()
-                    return
-                if not handle.accepted:
-                    self._reject(runtime, "routing goal rejected")
-                    return
-                runtime.vlm_goal_handle = handle
-                self._telemetry.mark(request_id, "routing_queue")
-                self._tasks.transition(
-                    runtime.task, PipelineState.VLM_ACTIVE, "routing active"
-                )
-                handle.get_result_async().add_done_callback(
-                    lambda done: self._on_routing_result(task_id, request_id, done)
-                )
-        except Exception as exc:
-            if runtime is not None:
-                self._reject(runtime, f"routing goal failed: {exc}")
-
-    def _on_routing_result(self, task_id: str, request_id: str, future) -> None:
-        runtime = self._current(task_id, request_id)
-        if runtime is None:
-            return
-        try:
-            with self._lock:
-                if not self._is_current(runtime) or not runtime.routing_stage:
-                    return
-                if time.monotonic_ns() >= runtime.deadline_ns:
-                    self._time_out(runtime, "routing deadline")
-                    return
-                result = future.result().result
-                if not result.success or result.request_id != request_id + "-routing":
-                    raise ValueError("routing failed or returned a stale request_id")
-                task = runtime.task
-                self._request_writer.write_text(
-                    task.run_id, task_id, request_id, "routing_response.txt",
-                    result.response_text,
-                )
-                route = parse_semantic_route(
-                    result.response_text, has_pending=runtime.routing_pending is not None,
-                )
-                self._telemetry.mark(request_id, "routing_inference")
-                self._tasks.transition(
-                    task, PipelineState.OUTPUT_VALIDATING, "routing received"
-                )
-                if runtime.routing_pending is not None:
-                    if route.relation_to_pending == "new_request":
-                        self._tasks.force_terminal(
-                            task, PipelineState.CANCELLED, "new user request"
-                        )
-                        self._publish_status(task, "superseded_by_new_request")
-                        self._finish_metrics(request_id, "new_request")
-                        task = self._tasks.accept_transcript(
-                            task.latest_transcript, route.mode or "clarification",
-                        )
-                        runtime.task = task
-                        runtime.policy = self._context_policy.requirements_for(
-                            route.mode or "clarification"
-                        )
-                        self._telemetry.begin(
-                            task.request_id, task.task_id, "qwen_routing:new_request"
-                        )
-                        runtime.router_record = dict(runtime.router_record)
-                        runtime.router_record["routing_source_request"] = request_id
-                        self._write_initial_artifacts(runtime)
-                    else:
-                        self._tasks.complete_clarification(task)
-                task.mode = route.mode or "clarification"
-                runtime.routing_stage = False
-                runtime.vlm_goal_handle = None
-                runtime.policy = self._context_policy.requirements_for(task.mode)
-                self._request_writer.write_json(
-                    task.run_id, task.task_id, task.request_id, "resolved_routing.json",
-                    {
-                        "mode": route.mode,
-                        "relation_to_pending": route.relation_to_pending,
-                        "needs_clarification": route.needs_clarification,
-                        "clarification_question": route.clarification_question,
-                        "routing_source_request": request_id,
-                        "original_transcript": task.original_transcript,
-                        "latest_transcript": task.latest_transcript,
-                        "clarification_history": [
-                            {"question": q, "answer": a}
-                            for q, a in task.clarification_history
-                        ],
-                        "effective_context_policy": runtime.policy.as_dict(),
-                    },
-                )
-                self.get_logger().info(
-                    f"[ROUTING] {task.task_id}: {task.mode}, "
-                    f"{route.relation_to_pending}, clarify={route.needs_clarification}"
-                )
-                if route.needs_clarification:
-                    self._tasks.wait_for_clarification(
-                        task, route.clarification_question
-                    )
-                    self._active = None
-                    self._publish_status(task, "clarification_required")
-                    self._finish_metrics(task.request_id, "clarification")
-                    self._speak(route.clarification_question)
-                    return
-                if task.state != PipelineState.CONTEXT_RETRIEVAL:
-                    self._tasks.transition(
-                        task, PipelineState.CONTEXT_RETRIEVAL, "routing resolved"
-                    )
-                self._publish_status(task, "routing_resolved")
-            if runtime.policy.needs_task_memory:
-                self._query_memory(runtime)
-            else:
-                self._prepare_prompt(runtime, self._empty_snapshot(task.request_id))
-        except Exception as exc:
-            self._reject(runtime, f"routing result rejected: {exc}")
+        self._query_memory(runtime)
 
     def _query_memory(self, runtime: RuntimeRequest) -> None:
         if not self._is_current(runtime):
             return
         if not self._memory_client.service_is_ready():
-            self._reject(runtime, "memory query service is unavailable")
+            self._set_context_availability(
+                runtime, "memory", "unavailable", "memory service is unavailable"
+            )
+            self._prepare_prompt(
+                runtime, self._empty_snapshot(runtime.task.request_id)
+            )
             return
         request = QueryMemory.Request()
         request.query = runtime.task.query_text
@@ -603,7 +452,13 @@ class CognitiveManagerNode(Node):
         try:
             response = future.result()
             if not response.success:
-                self._reject(runtime, f"RAG query failed: {response.error_message}")
+                self._set_context_availability(
+                    runtime,
+                    "memory",
+                    "unavailable",
+                    response.error_message or "memory query failed",
+                )
+                self._prepare_prompt(runtime, self._empty_snapshot(request_id))
                 return
             candidates = [
                 self._memory_candidate(value, float(score))
@@ -618,36 +473,62 @@ class CognitiveManagerNode(Node):
                 self._map_id,
                 candidates,
             )
+            self._set_context_availability(
+                runtime,
+                "memory",
+                "available",
+                f"{len(snapshot.items)} grounded candidate(s)",
+            )
             self._prepare_prompt(runtime, snapshot)
         except Exception as exc:
-            self._reject(runtime, f"context/prompt processing failed: {exc}")
+            self._set_context_availability(
+                runtime, "memory", "unavailable", str(exc)
+            )
+            self._prepare_prompt(runtime, self._empty_snapshot(request_id))
 
     def _prepare_prompt(
         self,
         runtime: RuntimeRequest,
         snapshot: ContextSnapshot,
     ) -> None:
+        if not self._is_current(runtime):
+            return
+        runtime.snapshot = snapshot
+        self._telemetry.mark(runtime.task.request_id, "rag_context")
+        self._obtain_frame(runtime)
+
+    def _compose_prompt_and_send(
+        self,
+        runtime: RuntimeRequest,
+        frame: CompressedImage,
+    ) -> None:
         try:
             if not self._is_current(runtime):
                 return
-            adaptive = self._adaptive_context.build(
-                runtime.policy,
-                runtime.task,
-                snapshot,
-            )
-            runtime.snapshot = snapshot
-            self._telemetry.mark(
-                runtime.task.request_id,
-                "rag_context" if runtime.policy.needs_task_memory else "context_build",
-            )
+            snapshot = runtime.snapshot
+            if snapshot is None:
+                raise ValueError("trusted context snapshot is missing")
+            adaptive = self._adaptive_context.build_cognitive(runtime.task, snapshot)
+            interaction_context = None
+            if runtime.task.clarification_history:
+                interaction_context = {
+                    "owner": "HIGH",
+                    "original_request": runtime.task.original_transcript,
+                    "turns": [
+                        {"question": question, "answer": answer}
+                        for question, answer in runtime.task.clarification_history
+                    ],
+                }
             runtime.prompt = self._prompts.compose(
                 transcript=runtime.task.original_transcript,
                 context_items=adaptive.context_items,
                 context_refs=adaptive.context_refs,
                 dialogue_history=adaptive.dialogue_history,
-                mode=adaptive.mode,
+                mode="cognitive",
                 trusted_context=adaptive.trusted_context,
-                include_rag_context=adaptive.include_rag_context,
+                include_rag_context=True,
+                context_availability=runtime.context_availability or {},
+                interaction_context=interaction_context,
             )
             runtime.base_prompt = runtime.prompt
             self._telemetry.mark(runtime.task.request_id, "prompt_composition")
@@ -658,12 +539,13 @@ class CognitiveManagerNode(Node):
                 "rag_context.json",
                 {
                     "schema_version": "flzat.rag_context.v1",
-                    "enabled": adaptive.include_rag_context,
+                    "enabled": True,
                     "environment_id": snapshot.environment_id,
                     "map_id": snapshot.map_id,
                     "context_refs": list(adaptive.context_refs),
                     "items": adaptive.context_items,
                     "truncated": snapshot.truncated,
+                    "availability": runtime.context_availability or {},
                 },
             )
             self._write_prompt_metadata(runtime, runtime.prompt, 1)
@@ -674,29 +556,26 @@ class CognitiveManagerNode(Node):
                 self._tasks.transition(
                     runtime.task,
                     PipelineState.PROMPT_READY,
-                    f"{runtime.policy.mode} context frozen",
+                    "cognitive context frozen",
                 )
                 self._tasks.transition(
                     runtime.task, PipelineState.VLM_QUEUED, "prompt composed"
                 )
                 self._publish_status(runtime.task, "prompt_ready")
-            if runtime.policy.needs_vision:
-                self._obtain_frame(runtime)
-            else:
-                self._telemetry.mark(runtime.task.request_id, "frame_skipped")
-                self._send_vlm(runtime, CompressedImage())
+            self._send_vlm(runtime, frame)
         except Exception as exc:
             self._reject(runtime, f"context/prompt processing failed: {exc}")
 
     def _obtain_frame(self, runtime: RuntimeRequest) -> None:
-        if not runtime.policy.needs_vision:
-            self._reject(runtime, "ContextPolicy forbids frame lookup for this mode")
-            return
         stamp = runtime.input_stamp
         if stamp is None or not (stamp.sec or stamp.nanosec):
             stamp = self.get_clock().now().to_msg()
         if not self._frame_client.service_is_ready():
-            self._reject(runtime, "frame service is unavailable")
+            self._set_context_availability(
+                runtime, "vision", "unavailable", "frame service is unavailable"
+            )
+            self._telemetry.mark(runtime.task.request_id, "frame_skipped")
+            self._compose_prompt_and_send(runtime, CompressedImage())
             return
         request = GetFrameNear.Request()
         request.target_stamp = stamp
@@ -715,11 +594,24 @@ class CognitiveManagerNode(Node):
         try:
             response = future.result()
             if not response.success or not response.frame.data:
-                self._reject(runtime, f"frame lookup failed: {response.message}")
+                self._set_context_availability(
+                    runtime,
+                    "vision",
+                    "unavailable",
+                    response.message or "frame lookup failed",
+                )
+                self._telemetry.mark(request_id, "frame_skipped")
+                self._compose_prompt_and_send(runtime, CompressedImage())
                 return
-            self._send_vlm(runtime, response.frame)
+            self._set_context_availability(
+                runtime, "vision", "available", "frame matched input timestamp"
+            )
+            self._telemetry.mark(request_id, "frame_lookup")
+            self._compose_prompt_and_send(runtime, response.frame)
         except Exception as exc:
-            self._reject(runtime, f"frame lookup failed: {exc}")
+            self._set_context_availability(runtime, "vision", "unavailable", str(exc))
+            self._telemetry.mark(request_id, "frame_skipped")
+            self._compose_prompt_and_send(runtime, CompressedImage())
 
     def _send_vlm(self, runtime: RuntimeRequest, frame: CompressedImage) -> None:
         if not self._is_current(runtime):
@@ -734,19 +626,11 @@ class CognitiveManagerNode(Node):
         if prompt is None:
             self._reject(runtime, "composed prompt is missing")
             return
-        if runtime.policy.needs_vision and not frame.data:
-            self._reject(runtime, "vision mode cannot invoke VLM without a frame")
-            return
-        if not runtime.policy.needs_vision and frame.data:
-            self._reject(runtime, "text-only mode received an unexpected frame")
-            return
         if runtime.attempts_sent == 0:
             runtime.frame = frame
         if runtime.frame is None:
             self._reject(runtime, "frozen VLM frame is missing")
             return
-        if runtime.policy.needs_vision and runtime.attempts_sent == 0:
-            self._telemetry.mark(runtime.task.request_id, "frame_lookup")
         runtime.attempts_sent += 1
         attempt = runtime.attempts_sent
         goal = RunVlm.Goal()
@@ -847,7 +731,6 @@ class CognitiveManagerNode(Node):
                     "VLM response received",
                 )
             validated = self._validator.validate(
-                runtime.policy.mode,
                 result.response_text,
                 runtime.snapshot,
                 expected_request_id=request_id,
@@ -870,7 +753,7 @@ class CognitiveManagerNode(Node):
                 "validated_output.json",
                 {
                     "schema_version": "flzat.validated_output.v1",
-                    "mode": validated.mode,
+                    "mode": "cognitive",
                     "output": validated.value,
                 },
             )
@@ -947,12 +830,26 @@ class CognitiveManagerNode(Node):
     def _handle_validated(
         self,
         runtime: RuntimeRequest,
-        validated: ValidatedModeOutput,
+        validated: ValidatedCognitiveOutput,
     ) -> None:
         task = runtime.task
         if validated.kind == OutcomeKind.NEEDS_CLARIFICATION:
             with self._lock:
+                if not self._tasks.can_request_clarification(task):
+                    self._tasks.force_terminal(
+                        task, PipelineState.REJECTED, "UNRESOLVED_ANSWER"
+                    )
+                    self._active = None
+                    self._publish_status(task, "UNRESOLVED_ANSWER")
+                    self._finish_metrics(task.request_id, "unresolved_answer")
+                    self.get_logger().warn(
+                        f"Clarification limit reached for {task.task_id}."
+                    )
+                    return
                 self._tasks.wait_for_clarification(task, validated.reply)
+                self._waiting_deadlines[task.task_id] = (
+                    time.monotonic_ns() + self._high_clarification_timeout_ns
+                )
                 self._active = None
                 self._publish_status(task, "clarification_required")
                 self._finish_metrics(task.request_id, "clarification")
@@ -968,26 +865,18 @@ class CognitiveManagerNode(Node):
             self._remember_turn(runtime, validated.reply)
             self._speak(validated.reply)
             return
-        if not runtime.policy.allows_low_command:
-            self._reject(
-                runtime,
-                f"route mode '{runtime.policy.mode}' cannot publish a High Command",
-            )
-            self._speak(self._text_parameter("rejection_speech"))
-            return
         if validated.task_outcome is None:
-            self._reject(runtime, "task validator did not return a task outcome")
+            self._reject(runtime, "cognitive validator did not return an outcome")
             return
-        self._publish_command(
+        self._dispatch_handoff(
             runtime,
             validated.task_outcome,
             validated.reply,
         )
 
-    def _publish_command(self, runtime: RuntimeRequest, outcome, success_speech: str) -> None:
-        if not runtime.policy.allows_low_command:
-            self._reject(runtime, "ContextPolicy blocked a non-task Low command")
-            return
+    def _dispatch_handoff(
+        self, runtime: RuntimeRequest, outcome, success_speech: str
+    ) -> None:
         task = runtime.task
         snapshot = runtime.snapshot
         if snapshot is None:
@@ -995,72 +884,215 @@ class CognitiveManagerNode(Node):
             return
         try:
             with self._lock:
-                self._tasks.transition(task, PipelineState.COMMAND_READY, "decision validated")
-            command_id, payload = self._assembler.assemble(task, outcome, snapshot)
-            with self._lock:
-                self._tasks.mark_command(task, command_id)
-                self._tasks.transition(task, PipelineState.WRITING_ARTIFACT, "writing JSON")
-            self._writer.write(task.run_id, task.task_id, command_id, payload)
-            self._telemetry.mark(task.request_id, "command_artifact")
-            with self._lock:
                 self._tasks.transition(
-                    task, PipelineState.PUBLISHING_COMMAND, "artifact committed"
+                    task, PipelineState.HANDOFF_READY, "decision validated"
                 )
-                self._tasks.transition(task, PipelineState.DISPATCHED, "ROS command publish")
-                self._dispatched[command_id] = task
-                self._success_speech[command_id] = success_speech
-                self._active = None
-                self._publish_status(task, "dispatched")
-            self._command_pub.publish(String(data=payload))
-            self._finish_metrics(task.request_id, "dispatched")
-        except Exception as exc:
-            self._reject(runtime, f"command assembly/write failed: {exc}")
-
-    def _on_low_status(self, message: String) -> None:
-        try:
-            raw = json.loads(message.data)
-            command_id = raw.get("command_id") if isinstance(raw, dict) else ""
-            task = self._dispatched.get(command_id)
-            if task is None:
-                raise ValueError("status references an unknown command")
-            status = self._low_status.parse(
-                message.data,
+            handoff_id, payload = self._assembler.assemble(task, outcome, snapshot)
+            self._request_writer.write_json(
                 task.run_id,
-                command_id,
+                task.task_id,
+                task.request_id,
+                "handoff_audit.json",
+                self._assembler.audit_record(task, handoff_id, snapshot),
             )
             with self._lock:
-                if task.state in TERMINAL_STATES:
-                    return
-                if status.state == "running" and task.state == PipelineState.DISPATCHED:
-                    self._tasks.transition(task, PipelineState.LOW_RUNNING, "Low running")
-                elif status.state == "succeeded":
-                    self._tasks.transition(task, PipelineState.SUCCEEDED, "Low succeeded")
-                elif status.state == "failed":
-                    self._tasks.transition(
-                        task, PipelineState.FAILED, status.error or "Low failed"
-                    )
-                elif status.state == "cancelled":
-                    self._tasks.transition(task, PipelineState.CANCELLED, "Low cancelled")
-                self._publish_status(task, f"low_{status.state}")
-            if status.state == "succeeded":
-                self._speak(self._success_speech.pop(command_id, ""))
-            elif status.state == "failed":
-                self._speak(status.error or "The robot could not complete the task.")
+                self._tasks.mark_handoff(task, handoff_id)
+                self._tasks.transition(task, PipelineState.WRITING_ARTIFACT, "writing JSON")
+            artifact_path = self._writer.write(
+                task.run_id, task.task_id, handoff_id, payload
+            ).resolve()
+            self._telemetry.mark(task.request_id, "handoff_artifact")
+            with self._lock:
+                self._tasks.transition(
+                    task, PipelineState.HANDOFF_PENDING, "artifact committed"
+                )
+                runtime.handoff_id = handoff_id
+                runtime.handoff_path = str(artifact_path)
+                self._dispatched[handoff_id] = task
+                self._handoff_paths[handoff_id] = str(artifact_path)
+                self._publish_status(task, "handoff_artifact_ready")
+            if not self._intent_client.server_is_ready():
+                self._fail_handoff(runtime, "Action A server is unavailable")
+                return
+            goal = HandleIntent.Goal()
+            goal.run_id = task.run_id
+            goal.task_id = task.task_id
+            goal.handoff_id = handoff_id
+            goal.json_path = str(artifact_path)
+            self._remember_turn(runtime, success_speech)
+            # Start accompanying speech before Low can call B. Action A remains
+            # independent, while an immediate B observes TTS BUSY and retries.
+            self._speak(success_speech)
+            future = self._intent_client.send_goal_async(
+                goal,
+                feedback_callback=lambda feedback: self._on_intent_feedback(
+                    task.task_id, task.request_id, feedback
+                ),
+            )
+            future.add_done_callback(
+                lambda done: self._on_intent_goal(
+                    task.task_id, task.request_id, done
+                )
+            )
         except Exception as exc:
-            self.get_logger().warn(f"Ignored invalid Low status: {exc}")
+            self._reject(runtime, f"handoff assembly/write failed: {exc}")
+
+    def _on_intent_goal(self, task_id: str, request_id: str, future) -> None:
+        runtime = self._current(task_id, request_id)
+        try:
+            handle = future.result()
+            if runtime is None:
+                if handle.accepted:
+                    handle.cancel_goal_async()
+                return
+            if not handle.accepted:
+                self._fail_handoff(runtime, "Action A goal was rejected")
+                return
+            with self._lock:
+                if not self._is_current(runtime):
+                    handle.cancel_goal_async()
+                    return
+                runtime.handoff_goal_handle = handle
+                self._telemetry.mark(request_id, "action_a_accepted")
+                cancel_requested = runtime.handoff_cancel_requested
+            handle.get_result_async().add_done_callback(
+                lambda done: self._on_intent_result(task_id, request_id, done)
+            )
+            if cancel_requested:
+                handle.cancel_goal_async()
+        except Exception as exc:
+            if runtime is not None:
+                self._fail_handoff(runtime, f"Action A goal failed: {exc}")
+
+    def _on_intent_feedback(self, task_id: str, request_id: str, message) -> None:
+        runtime = self._current(task_id, request_id)
+        if runtime is None:
+            return
+        stage = str(message.feedback.stage).strip()
+        detail = str(message.feedback.detail).strip()
+        if stage not in HANDLE_INTENT_STAGES:
+            self.get_logger().warn(
+                f"Ignored unsupported Action A feedback stage: {stage!r}"
+            )
+            return
+        self._publish_action_event(
+            event="ACTION_A_FEEDBACK",
+            task=runtime.task,
+            handoff_id=runtime.handoff_id,
+            detail=detail,
+            stage=stage,
+        )
+
+    def _on_intent_result(self, task_id: str, request_id: str, future) -> None:
+        runtime = self._current(task_id, request_id)
+        if runtime is None:
+            return
+        try:
+            response = future.result()
+            result = response.result
+            outcome = str(result.outcome).strip()
+            detail = str(result.detail).strip()
+            if outcome not in HANDLE_INTENT_OUTCOMES:
+                raise ValueError(f"unsupported Action A outcome: {outcome!r}")
+            expected_status = {
+                "STARTED_FAST": GoalStatus.STATUS_SUCCEEDED,
+                "STARTED_PLAN": GoalStatus.STATUS_SUCCEEDED,
+                "REFUSED": GoalStatus.STATUS_SUCCEEDED,
+                "FAILED": GoalStatus.STATUS_ABORTED,
+                "CANCELED": GoalStatus.STATUS_CANCELED,
+            }[outcome]
+            if response.status != expected_status:
+                raise ValueError(
+                    f"Action A status/outcome mismatch: {response.status}/{outcome}"
+                )
+            with self._lock:
+                if not self._is_current(runtime):
+                    return
+                task = runtime.task
+                self._tasks.transition(
+                    task, PipelineState.HANDOFF_ACCEPTED, f"Action A {outcome}"
+                )
+                if outcome in {"STARTED_FAST", "STARTED_PLAN"}:
+                    self._tasks.transition(
+                        task, PipelineState.LOW_RUNNING, outcome
+                    )
+                elif outcome == "REFUSED":
+                    self._tasks.transition(task, PipelineState.REFUSED, detail or outcome)
+                elif outcome == "FAILED":
+                    self._tasks.transition(task, PipelineState.FAILED, detail or outcome)
+                else:
+                    self._tasks.transition(
+                        task, PipelineState.CANCELLED, detail or outcome
+                    )
+                self._active = None
+                self._publish_status(task, f"action_a:{outcome}")
+                self._finish_metrics(request_id, outcome.casefold())
+            self._publish_action_event(
+                event="ACTION_A_RESULT",
+                task=runtime.task,
+                handoff_id=runtime.handoff_id,
+                detail=detail,
+                outcome=outcome,
+            )
+            self._publish_ready_if_available()
+        except Exception as exc:
+            self._fail_handoff(runtime, f"Action A result failed: {exc}")
+
+    def _fail_handoff(self, runtime: RuntimeRequest, reason: str) -> None:
+        with self._lock:
+            if not self._is_current(runtime):
+                return
+            self._tasks.force_terminal(runtime.task, PipelineState.FAILED, reason)
+            self._active = None
+            self._publish_status(runtime.task, reason)
+            self._finish_metrics(runtime.task.request_id, "action_a_transport_failed")
+        self.get_logger().error(reason)
+        self._publish_ready_if_available()
 
     def _on_cancel(self, message: String) -> None:
         requested_id = message.data.strip()
-        if not requested_id:
-            self._stop_speech()
-        low_cancel_payload = ""
         with self._lock:
+            interaction = self._interaction
+            if interaction is not None and requested_id in {
+                "",
+                interaction.task_id,
+                interaction.handoff_id,
+                interaction.interaction_id,
+            }:
+                interaction.interrupted_error = "INTERRUPTED_BY_USER"
+                interaction.answer_event.set()
+                if not requested_id:
+                    self._stop_speech()
+                self._publish_action_event(
+                    event="ACTION_B_INTERRUPTED",
+                    task=self._dispatched.get(interaction.handoff_id),
+                    handoff_id=interaction.handoff_id,
+                    interaction_id=interaction.interaction_id,
+                    detail="INTERRUPTED_BY_USER",
+                )
+                return
+
+            if not requested_id:
+                self._stop_speech()
+
             runtime = self._active
             if runtime is not None and requested_id in {
                 "",
                 runtime.task.task_id,
                 runtime.task.request_id,
+                runtime.handoff_id,
             }:
+                if runtime.handoff_id:
+                    runtime.handoff_cancel_requested = True
+                    if runtime.handoff_goal_handle is not None:
+                        runtime.handoff_goal_handle.cancel_goal_async()
+                    self._publish_action_event(
+                        event="ACTION_A_CANCEL_REQUESTED",
+                        task=runtime.task,
+                        handoff_id=runtime.handoff_id,
+                        detail="waiting for Low Action A cancellation result",
+                    )
+                    return
                 if runtime.vlm_goal_handle is not None:
                     runtime.vlm_goal_handle.cancel_goal_async()
                 self._tasks.force_terminal(
@@ -1069,6 +1101,7 @@ class CognitiveManagerNode(Node):
                 self._active = None
                 self._publish_status(runtime.task, "cancelled")
                 self._finish_metrics(runtime.task.request_id, "cancelled")
+                self._publish_ready_if_available()
                 return
 
             waiting_id = self._tasks.waiting_task_id
@@ -1078,29 +1111,292 @@ class CognitiveManagerNode(Node):
                     self._tasks.force_terminal(
                         waiting, PipelineState.CANCELLED, "cancel clarification"
                     )
+                    self._waiting_deadlines.pop(waiting.task_id, None)
                     self._publish_status(waiting, "cancelled")
+                    self._publish_ready_if_available()
                     return
 
-            for command_id, task in reversed(tuple(self._dispatched.items())):
-                if task.state in TERMINAL_STATES:
-                    continue
-                if requested_id not in {"", command_id, task.task_id, task.request_id}:
-                    continue
-                low_cancel_payload = build_low_cancel(
-                    task.run_id,
-                    command_id,
+            for handoff_id, task in reversed(tuple(self._dispatched.items())):
+                if requested_id not in {
+                    "",
+                    handoff_id,
                     task.task_id,
                     task.request_id,
+                }:
+                    continue
+                self._publish_action_event(
+                    event="LOW_CANCEL_UNAVAILABLE",
+                    task=task,
+                    handoff_id=handoff_id,
+                    detail=(
+                        "Action A has ended; this phase has no Low execution "
+                        "cancel contract"
+                    ),
                 )
-                self._success_speech.pop(command_id, None)
-                self._publish_status(task, "low_cancel_requested")
-                break
-        if low_cancel_payload:
-            self._low_cancel_pub.publish(String(data=low_cancel_payload))
+                return
+
+    def _on_ask_user_goal(self, goal_request: AskUser.Goal) -> GoalResponse:
+        try:
+            run_id = validate_safe_identifier(goal_request.run_id, "run_id")
+            task_id = validate_safe_identifier(goal_request.task_id, "task_id")
+            handoff_id = validate_safe_identifier(
+                goal_request.handoff_id, "handoff_id"
+            )
+            interaction_id = validate_safe_identifier(
+                goal_request.interaction_id, "interaction_id"
+            )
+            kind = str(goal_request.kind).strip().upper()
+            if kind not in ASK_USER_KINDS:
+                raise ValueError(f"unsupported interaction kind: {kind!r}")
+            content_hint = str(goal_request.content_hint).strip()
+            if not content_hint:
+                raise ValueError("content_hint cannot be empty")
+            timeout_s = float(goal_request.timeout_s)
+            if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+                raise ValueError("timeout_s must be finite and positive")
+            with self._lock:
+                task = self._dispatched.get(handoff_id)
+                if (
+                    task is None
+                    or task.run_id != run_id
+                    or task.task_id != task_id
+                ):
+                    raise ValueError("Action B does not reference a known handoff")
+                busy_reason = ""
+                if self._interaction is not None or self._interaction_reserved:
+                    busy_reason = "user_interaction_active"
+                elif self._speech_busy:
+                    busy_reason = "tts_active"
+                elif self._active is not None and not (
+                    self._active.task is task
+                    and self._active.handoff_id == handoff_id
+                    and self._active.task.state == PipelineState.HANDOFF_PENDING
+                ):
+                    busy_reason = "cognitive_request_active"
+                if busy_reason:
+                    self._publish_busy(
+                        event="action_b_rejected",
+                        reason=busy_reason,
+                        interaction_id=interaction_id,
+                    )
+                    return GoalResponse.REJECT
+                self._interaction_reserved = True
+                self._interaction_reservation_deadline_ns = (
+                    time.monotonic_ns() + int(timeout_s * 1_000_000_000)
+                )
+            return GoalResponse.ACCEPT
+        except Exception as exc:
+            self.get_logger().warn(f"Rejected Action B goal: {exc}")
+            return GoalResponse.REJECT
+
+    def _on_ask_user_cancel(self, _goal_handle) -> CancelResponse:
+        return CancelResponse.ACCEPT
+
+    def _execute_ask_user(self, goal_handle) -> AskUser.Result:
+        request = goal_handle.request
+        session = UserInteractionSession(
+            goal_handle=goal_handle,
+            run_id=str(request.run_id).strip(),
+            task_id=str(request.task_id).strip(),
+            handoff_id=str(request.handoff_id).strip(),
+            interaction_id=str(request.interaction_id).strip(),
+            kind=str(request.kind).strip().upper(),
+            content_hint=str(request.content_hint).strip(),
+            options=tuple(str(value).strip() for value in request.options),
+            deadline_ns=(
+                self._interaction_reservation_deadline_ns
+                or time.monotonic_ns()
+                + int(float(request.timeout_s) * 1_000_000_000)
+            ),
+            answer_event=threading.Event(),
+        )
+        with self._lock:
+            if self._interaction is not None:
+                self._interaction_reserved = False
+                self._interaction_reservation_deadline_ns = 0
+                goal_handle.abort()
+                return self._ask_user_result(error="INTERACTION_STATE_CONFLICT")
+            self._interaction = session
+            self._interaction_reserved = False
+            self._interaction_reservation_deadline_ns = 0
+        self._publish_action_event(
+            event="ACTION_B_ACCEPTED",
+            task=self._dispatched.get(session.handoff_id),
+            handoff_id=session.handoff_id,
+            interaction_id=session.interaction_id,
+            detail=session.kind,
+        )
+        try:
+            speech_status = self._speak_interaction(session, session.content_hint)
+            terminal = self._speech_terminal_result(
+                goal_handle, session, speech_status
+            )
+            if terminal is not None:
+                return terminal
+
+            if session.kind not in ASK_USER_LISTENING_KINDS:
+                goal_handle.succeed()
+                return self._ask_user_result(outcome="ANSWERED")
+
+            while True:
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    return self._ask_user_result()
+                if session.interrupted_error:
+                    goal_handle.abort()
+                    return self._ask_user_result(error=session.interrupted_error)
+                if time.monotonic_ns() >= session.deadline_ns:
+                    goal_handle.succeed()
+                    return self._ask_user_result(outcome="TIMEOUT")
+
+                feedback = AskUser.Feedback()
+                feedback.stage = "listening"
+                feedback.detail = "waiting for a natural-language answer"
+                session.answer_event.clear()
+                session.listening = True
+                goal_handle.publish_feedback(feedback)
+                while not session.answer_event.wait(timeout=0.05):
+                    if goal_handle.is_cancel_requested:
+                        session.listening = False
+                        goal_handle.canceled()
+                        return self._ask_user_result()
+                    if time.monotonic_ns() >= session.deadline_ns:
+                        session.listening = False
+                        goal_handle.succeed()
+                        return self._ask_user_result(outcome="TIMEOUT")
+                session.listening = False
+                if session.interrupted_error:
+                    goal_handle.abort()
+                    return self._ask_user_result(error=session.interrupted_error)
+                assessment = assess_user_answer(session.answer)
+                if assessment.disposition == "ANSWERED":
+                    goal_handle.succeed()
+                    return self._ask_user_result(
+                        outcome="ANSWERED", answer=assessment.raw_answer
+                    )
+                if assessment.disposition == "DECLINED":
+                    goal_handle.succeed()
+                    return self._ask_user_result(
+                        outcome="DECLINED", answer=assessment.raw_answer
+                    )
+                if session.repeat_count >= self._interaction_max_reprompts:
+                    goal_handle.abort()
+                    return self._ask_user_result(error="UNRESOLVED_ANSWER")
+                session.repeat_count += 1
+                session.answer = ""
+                repeat = (
+                    "I did not understand your answer. " + session.content_hint
+                )
+                speech_status = self._speak_interaction(session, repeat)
+                terminal = self._speech_terminal_result(
+                    goal_handle, session, speech_status
+                )
+                if terminal is not None:
+                    return terminal
+        except Exception as exc:
+            self.get_logger().error(f"Action B execution failed: {exc}")
+            try:
+                goal_handle.abort()
+            except Exception:
+                pass
+            return self._ask_user_result(error=f"INTERACTION_ERROR:{exc}")
+        finally:
+            with self._lock:
+                if self._interaction is session:
+                    self._interaction = None
+                self._interaction_reserved = False
+                self._interaction_reservation_deadline_ns = 0
+            self._publish_action_event(
+                event="ACTION_B_FINISHED",
+                task=self._dispatched.get(session.handoff_id),
+                handoff_id=session.handoff_id,
+                interaction_id=session.interaction_id,
+                detail="interaction resources released",
+            )
+            self._publish_ready_if_available()
+
+    def _speak_interaction(
+        self, session: UserInteractionSession, text: str
+    ) -> str:
+        feedback = AskUser.Feedback()
+        feedback.stage = "speaking"
+        feedback.detail = text
+        session.goal_handle.publish_feedback(feedback)
+        completed = threading.Event()
+        result: dict[str, object] = {"success": False, "error": ""}
+
+        def on_complete(success: bool, error: str) -> None:
+            result["success"] = success
+            result["error"] = error
+            completed.set()
+
+        if not self._speak(text, on_complete=on_complete, allow_queue=False):
+            return "FAILED"
+        while not completed.wait(timeout=0.05):
+            if session.goal_handle.is_cancel_requested:
+                self._stop_speech()
+                return "CANCELED"
+            if session.interrupted_error:
+                self._stop_speech()
+                return "INTERRUPTED"
+            if time.monotonic_ns() >= session.deadline_ns:
+                self._stop_speech()
+                return "TIMEOUT"
+        if not bool(result["success"]):
+            self.get_logger().warn(
+                f"Action B TTS failed: {str(result['error'])}"
+            )
+            return "FAILED"
+        return "COMPLETED"
+
+    def _speech_terminal_result(
+        self, goal_handle, session: UserInteractionSession, status: str
+    ) -> AskUser.Result | None:
+        if session.interrupted_error:
+            goal_handle.abort()
+            return self._ask_user_result(error=session.interrupted_error)
+        if status == "COMPLETED":
+            return None
+        if status == "CANCELED":
+            goal_handle.canceled()
+            return self._ask_user_result()
+        if status == "TIMEOUT":
+            goal_handle.succeed()
+            return self._ask_user_result(outcome="TIMEOUT")
+        if status == "INTERRUPTED":
+            goal_handle.abort()
+            return self._ask_user_result(
+                error=session.interrupted_error or "INTERRUPTED_BY_USER"
+            )
+        goal_handle.abort()
+        return self._ask_user_result(error="TTS_UNAVAILABLE_OR_FAILED")
+
+    @staticmethod
+    def _ask_user_result(
+        *, outcome: str = "", answer: str = "", error: str = ""
+    ) -> AskUser.Result:
+        result = AskUser.Result()
+        result.outcome = outcome
+        result.answer = answer
+        result.error_message = error
+        return result
 
     def _on_timer(self) -> None:
         with self._lock:
             self._expire_speech()
+            waiting_id = self._tasks.waiting_task_id
+            if waiting_id:
+                deadline = self._waiting_deadlines.get(waiting_id, 0)
+                if deadline and time.monotonic_ns() >= deadline:
+                    waiting = self._tasks.get(waiting_id)
+                    self._tasks.force_terminal(
+                        waiting,
+                        PipelineState.TIMED_OUT,
+                        "clarification deadline",
+                    )
+                    self._waiting_deadlines.pop(waiting_id, None)
+                    self._publish_status(waiting, "clarification_timed_out")
+                    self._publish_ready_if_available()
         with self._lock:
             runtime = self._active
             if runtime is None or time.monotonic_ns() < runtime.deadline_ns:
@@ -1113,6 +1409,8 @@ class CognitiveManagerNode(Node):
                 return
             if runtime.vlm_goal_handle is not None:
                 runtime.vlm_goal_handle.cancel_goal_async()
+            if runtime.handoff_goal_handle is not None:
+                runtime.handoff_goal_handle.cancel_goal_async()
             self._tasks.force_terminal(runtime.task, PipelineState.TIMED_OUT, reason)
             self._active = None
             self._publish_status(runtime.task, "timed_out")
@@ -1122,6 +1420,8 @@ class CognitiveManagerNode(Node):
         with self._lock:
             if not self._is_current(runtime):
                 return
+            if runtime.handoff_goal_handle is not None:
+                runtime.handoff_goal_handle.cancel_goal_async()
             self._tasks.force_terminal(runtime.task, PipelineState.REJECTED, reason)
             self._active = None
             self._publish_status(runtime.task, reason)
@@ -1149,7 +1449,7 @@ class CognitiveManagerNode(Node):
             "run_id": task.run_id,
             "task_id": task.task_id,
             "request_id": task.request_id,
-            "command_id": task.command_id,
+            "handoff_id": task.handoff_id,
             "state": task.state.value,
             "reason": reason,
         }
@@ -1159,8 +1459,10 @@ class CognitiveManagerNode(Node):
             PipelineState.CONTEXT_RETRIEVAL,
             PipelineState.WAITING_CLARIFICATION,
             PipelineState.RESPONSE_ONLY,
-            PipelineState.DISPATCHED,
+            PipelineState.HANDOFF_PENDING,
+            PipelineState.HANDOFF_ACCEPTED,
             PipelineState.LOW_RUNNING,
+            PipelineState.REFUSED,
             PipelineState.SUCCEEDED,
             PipelineState.FAILED,
             PipelineState.CANCELLED,
@@ -1170,6 +1472,7 @@ class CognitiveManagerNode(Node):
             detail = ""
             if task.state in {
                 PipelineState.WAITING_CLARIFICATION,
+                PipelineState.REFUSED,
                 PipelineState.FAILED,
                 PipelineState.CANCELLED,
                 PipelineState.TIMED_OUT,
@@ -1179,6 +1482,85 @@ class CognitiveManagerNode(Node):
                 f"[STATUS] {task.task_id}: {task.state.value}{detail}"
             )
         self.get_logger().debug(f"HIGH_STATUS {serialized}")
+
+    def _publish_busy(
+        self,
+        *,
+        event: str,
+        reason: str,
+        input_id: str = "",
+        interaction_id: str = "",
+    ) -> None:
+        active = self._active
+        interaction = self._interaction
+        payload = {
+            "schema_version": "flzat.high_availability.v1",
+            "run_id": self._tasks.run_id,
+            "state": "BUSY",
+            "event": event,
+            "reason": reason,
+            "accepted": False,
+            "queued": False,
+            "input_id": input_id,
+            "interaction_id": interaction_id,
+            "active_task_id": active.task.task_id if active else "",
+            "active_request_id": active.task.request_id if active else "",
+            "active_interaction_id": (
+                interaction.interaction_id if interaction else ""
+            ),
+        }
+        self._status_pub.publish(String(data=canonical_json(payload)))
+        self.get_logger().info(
+            f"[BUSY] rejected {event}: {reason}; queued=false"
+        )
+
+    def _publish_ready_if_available(self) -> None:
+        with self._lock:
+            if (
+                self._active is not None
+                or self._interaction is not None
+                or self._interaction_reserved
+                or self._speech_busy
+                or self._tasks.waiting_task_id
+            ):
+                return
+            payload = {
+                "schema_version": "flzat.high_availability.v1",
+                "run_id": self._tasks.run_id,
+                "state": "READY",
+                "event": "resources_released",
+                "accepted": True,
+                "queued": False,
+            }
+        self._status_pub.publish(String(data=canonical_json(payload)))
+        self.get_logger().info("[READY] High System can accept a new request.")
+
+    def _publish_action_event(
+        self,
+        *,
+        event: str,
+        task: TaskRecord | None,
+        handoff_id: str,
+        interaction_id: str = "",
+        detail: str = "",
+        stage: str = "",
+        outcome: str = "",
+    ) -> None:
+        payload = {
+            "schema_version": "flzat.high_action_event.v1",
+            "run_id": task.run_id if task else self._tasks.run_id,
+            "task_id": task.task_id if task else "",
+            "request_id": task.request_id if task else "",
+            "handoff_id": handoff_id,
+            "interaction_id": interaction_id,
+            "event": event,
+            "stage": stage,
+            "outcome": outcome,
+            "detail": detail,
+        }
+        self._status_pub.publish(String(data=canonical_json(payload)))
+        summary = stage or outcome or detail
+        self.get_logger().info(f"[{event}] {summary}".rstrip())
 
     def _finish_metrics(self, request_id: str, outcome: str) -> None:
         payload = self._telemetry.finish(request_id, outcome)
@@ -1199,11 +1581,6 @@ class CognitiveManagerNode(Node):
             if vlm_values:
                 vlm_ms = sum(vlm_values)
         timing = [f"total={float(payload['total_ms']):.1f} ms"]
-        routing_ms = (
-            phase_ms.get("routing_inference") if isinstance(phase_ms, dict) else None
-        )
-        if isinstance(routing_ms, (int, float)):
-            timing.append(f"routing={float(routing_ms):.1f} ms")
         if isinstance(rag_ms, (int, float)):
             timing.append(f"rag={float(rag_ms):.1f} ms")
         if vlm_ms is not None:
@@ -1220,40 +1597,32 @@ class CognitiveManagerNode(Node):
             dependencies = {
                 "memory": self._memory_client.service_is_ready(),
                 "frame": self._frame_client.service_is_ready(),
-                "intent_router": self.count_publishers(self._routed_topic) > 0,
                 "tts": self._tts_client.server_is_ready(),
                 "vlm": self._vlm_client.server_is_ready(),
+                "action_a": self._intent_client.server_is_ready(),
             }
+            # Memory and vision are optional context sources in the unified flow.
             base_ready = (
-                dependencies["intent_router"]
-                and dependencies["tts"]
+                dependencies["tts"]
                 and dependencies["vlm"]
+                and dependencies["action_a"]
             )
-            mode_readiness: dict[str, bool] = {}
-            for mode in ROUTE_MODES:
-                requirements = self._context_policy.requirements_for(mode)
-                mode_readiness[mode] = bool(
-                    base_ready
-                    and (
-                        not requirements.needs_task_memory
-                        or dependencies["memory"]
-                    )
-                    and (not requirements.needs_vision or dependencies["frame"])
-                )
-            active_mode = active.policy.mode if active else ""
+            mode_readiness = {"cognitive": bool(base_ready)}
+            active_mode = "cognitive" if active else ""
             payload = {
                 "schema_version": "flzat.high_health.v2",
                 "run_id": self._tasks.run_id,
                 "node": self.get_name(),
-                "ready": mode_readiness.get(
-                    active_mode, mode_readiness["task_command"]
-                ),
+                "ready": mode_readiness["cognitive"],
                 "dependencies": dependencies,
                 "mode_readiness": mode_readiness,
                 "active_mode": active_mode,
                 "active_task_id": active.task.task_id if active else "",
                 "active_request_id": active.task.request_id if active else "",
                 "waiting_clarification_task_id": waiting_task_id,
+                "active_interaction_id": (
+                    self._interaction.interaction_id if self._interaction else ""
+                ),
                 "uptime_s": round(
                     (time.monotonic_ns() - self._started_ns) / 1_000_000_000.0,
                     3,
@@ -1262,22 +1631,33 @@ class CognitiveManagerNode(Node):
             }
         self._health_pub.publish(String(data=canonical_json(payload)))
 
-    def _speak(self, text: str) -> None:
+    def _speak(
+        self,
+        text: str,
+        *,
+        on_complete: Callable[[bool, str], None] | None = None,
+        allow_queue: bool = True,
+    ) -> bool:
         value = text.strip()
         if not value:
-            return
+            if on_complete is not None:
+                on_complete(True, "")
+            return True
         with self._lock:
             if self._speech_busy:
+                if not allow_queue or on_complete is not None:
+                    return False
                 if self._speech_pending is not None:
                     self.get_logger().warn("TTS busy; replaced older queued reply.")
                 self._speech_pending = (value, time.monotonic())
-                return
+                return True
             if not self._tts_client.server_is_ready():
                 self.get_logger().warn("TTS unavailable; speech was not played.")
-                return
+                return False
             self._speech_serial += 1
             serial = self._speech_serial
             self._speech_busy = True
+            self._speech_completion = on_complete
             self._speech_deadline = time.monotonic() + self._speech_timeout_s
             try:
                 self._tts_client.send_goal_async(TextToSpeech.Goal(text=value)).add_done_callback(
@@ -1285,7 +1665,9 @@ class CognitiveManagerNode(Node):
                 )
             except Exception as exc:
                 self.get_logger().warn(f"TTS dispatch failed: {exc}")
-                self._finish_speech()
+                self._finish_speech(False, f"dispatch failed: {exc}")
+                return False
+            return True
 
     def _on_speech_goal(self, serial: int, future) -> None:
         with self._lock:
@@ -1298,7 +1680,7 @@ class CognitiveManagerNode(Node):
                     return
                 if not handle.accepted:
                     self.get_logger().warn("TTS rejected reply; speech was not played.")
-                    self._finish_speech()
+                    self._finish_speech(False, "goal rejected")
                     return
                 self._speech_handle = handle
                 handle.get_result_async().add_done_callback(
@@ -1307,7 +1689,7 @@ class CognitiveManagerNode(Node):
             except Exception as exc:
                 self.get_logger().warn(f"TTS goal failed: {exc}")
                 if serial == self._speech_serial:
-                    self._finish_speech()
+                    self._finish_speech(False, f"goal failed: {exc}")
 
     def _on_speech_result(self, serial: int, future) -> None:
         with self._lock:
@@ -1318,34 +1700,50 @@ class CognitiveManagerNode(Node):
                 response = future.result()
                 if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
                     self.get_logger().warn(f"TTS reply failed: status={response.status}.")
+                    success = False
+                    error = f"status={response.status}"
                 else:
                     self.get_logger().debug("TTS reply completed.")
+                    success = True
+                    error = ""
             except Exception as exc:
                 self.get_logger().warn(f"TTS result failed: {exc}")
-            self._finish_speech()
+                success = False
+                error = f"result failed: {exc}"
+            self._finish_speech(success, error)
 
     def _expire_speech(self) -> None:
         if self._speech_busy and time.monotonic() >= self._speech_deadline:
             self.get_logger().warn("TTS response timed out; discarding queued speech.")
             self._stop_speech()
 
-    def _finish_speech(self) -> None:
+    def _finish_speech(self, success: bool = True, error: str = "") -> None:
         self._speech_serial += 1
         self._speech_busy = False
         self._speech_handle = None
+        completion, self._speech_completion = self._speech_completion, None
         pending, self._speech_pending = self._speech_pending, None
+        if completion is not None:
+            try:
+                completion(success, error)
+            except Exception as exc:
+                self.get_logger().warn(f"TTS completion callback failed: {exc}")
         if pending is not None:
             text, received_at = pending
             if time.monotonic() - received_at < self._speech_timeout_s:
                 self._speak(text)
             else:
                 self.get_logger().warn("Discarded expired queued TTS reply.")
+        else:
+            self._publish_ready_if_available()
 
     def _stop_speech(self) -> None:
         with self._lock:
+            if not self._speech_busy and self._speech_pending is None:
+                return
             handle = self._speech_handle
             self._speech_pending = None
-            self._finish_speech()
+            self._finish_speech(False, "speech cancelled")
             if handle is not None:
                 try:
                     handle.cancel_goal_async()
@@ -1357,7 +1755,7 @@ class CognitiveManagerNode(Node):
             return
         try:
             self._conversation.append(
-                runtime.policy.mode,
+                "cognitive",
                 runtime.task.latest_transcript,
                 assistant,
             )
@@ -1375,7 +1773,7 @@ class CognitiveManagerNode(Node):
                 "schema_version": "flzat.transcript.v1",
                 "task_id": task.task_id,
                 "request_id": task.request_id,
-                "mode": runtime.policy.mode,
+                "mode": "cognitive",
                 "transcript": task.latest_transcript,
             },
         )
@@ -1383,18 +1781,8 @@ class CognitiveManagerNode(Node):
             task.run_id,
             task.task_id,
             task.request_id,
-            "router.json",
-            runtime.router_record,
-        )
-        self._request_writer.write_json(
-            task.run_id,
-            task.task_id,
-            task.request_id,
-            "context_policy.json",
-            {
-                "schema_version": "flzat.context_policy.v1",
-                **runtime.policy.as_dict(),
-            },
+            "input.json",
+            runtime.input_record,
         )
 
     def _write_prompt_metadata(
@@ -1427,6 +1815,22 @@ class CognitiveManagerNode(Node):
             },
         )
 
+    @staticmethod
+    def _set_context_availability(
+        runtime: RuntimeRequest,
+        source: str,
+        status: str,
+        reason: str,
+    ) -> None:
+        if status not in {"available", "unavailable", "pending"}:
+            raise ValueError("unsupported context availability status")
+        if runtime.context_availability is None:
+            runtime.context_availability = {}
+        runtime.context_availability[source] = {
+            "status": status,
+            "reason": reason.strip()[:500],
+        }
+
     def _empty_snapshot(self, request_id: str) -> ContextSnapshot:
         return ContextSnapshot(
             request_id=request_id,
@@ -1450,6 +1854,8 @@ class CognitiveManagerNode(Node):
 
     @staticmethod
     def _memory_candidate(message, score: float) -> MemoryCandidate:
+        if len(message.attribute_keys) != len(message.attribute_values):
+            raise ValueError("memory attributes have mismatched keys and values")
         point = message.map_position.point
         position = None
         if message.map_position.header.frame_id == "map" and all(
@@ -1466,6 +1872,17 @@ class CognitiveManagerNode(Node):
             scene=message.scene,
             score=score,
             position=position,
+            attributes=tuple(zip(message.attribute_keys, message.attribute_values)),
+            first_seen_ros_ns=(
+                int(message.first_seen.sec) * 1_000_000_000
+                + int(message.first_seen.nanosec)
+            ),
+            last_seen_ros_ns=(
+                int(message.last_seen.sec) * 1_000_000_000
+                + int(message.last_seen.nanosec)
+            ),
+            localization_quality=float(message.localization_quality),
+            confidence=float(message.confidence),
         )
 
     def _text_parameter(self, name: str) -> str:
@@ -1473,6 +1890,8 @@ class CognitiveManagerNode(Node):
 
     def destroy_node(self) -> None:
         self._stop_speech()
+        self._ask_user_server.destroy()
+        self._intent_client.destroy()
         self._vlm_client.destroy()
         self._tts_client.destroy()
         super().destroy_node()

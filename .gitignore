@@ -6,6 +6,7 @@
 # Runtime output and recorded data
 /flzat_high_system_output/
 /cloud_test_output/
+/test_output/
 /rosbag2_*/
 *.db3
 *.mcap
@@ -39,3 +40,5 @@ Thumbs.db
 # Markdown documentation (keep README files at any directory level)
 *.[mM][dD]
 ![rR][eE][aA][dD][mM][eE].[mM][dD]
+!docs/HIGH_SYSTEM_COGNITIVE_REFACTOR_PLAN.md
+!docs/HIGH_LOW_ACTION_CONTRACT.md

@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 
@@ -28,41 +27,11 @@ def test_fake_vlm_transport_allows_text_only_requests():
     assert "request.image.data" not in goal_source
 
 
-def test_low_status_example_is_json_serializable():
-    value = {
-        "schema_version": "flzat.low_status.v2",
-        "run_id": "run-20261014T000000Z",
-        "command_id": "task-0001-c01",
-        "state": "accepted",
-        "error": "",
-    }
-    assert json.loads(json.dumps(value))["command_id"] == "task-0001-c01"
-
-
-def test_low_mock_correlates_commands_by_run_and_command_id():
+def test_low_mock_correlates_handoffs_and_reads_path_before_result():
     source = (ROOT / "flzat_high_bringup/low_system_mock.py").read_text(
         encoding="utf-8"
     )
-    assert "command_key = (run_id, command_id)" in source
-    assert "self._commands[command_key]" in source
-
-
-def test_fake_routing_sequence_does_not_consume_main_responses():
-    import threading
-    from types import SimpleNamespace
-    from flzat_high_bringup.fake_servers import FakeVlmServer
-
-    values = {
-        "routing_response_sequence": ["routing-1", "routing-2"],
-        "response_sequence": ["main", "repair"],
-    }
-    fake = SimpleNamespace(
-        _response_lock=threading.Lock(),
-        _response_index=0,
-        _routing_response_index=0,
-        get_parameter=lambda name: SimpleNamespace(value=values[name]),
-    )
-    assert FakeVlmServer._next_routing_response(fake) == "routing-1"
-    assert FakeVlmServer._next_response(fake) == "main"
-    assert FakeVlmServer._next_routing_response(fake) == "routing-2"
-    assert FakeVlmServer._next_response(fake) == "repair"
+    assert "key = (run_id, handoff_id)" in source
+    assert "duplicate handoff_id" in source
+    assert "Path(str(request.json_path)).resolve(strict=True)" in source
+    assert '"flzat.high_handoff.v2"' in source

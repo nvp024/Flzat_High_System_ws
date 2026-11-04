@@ -19,9 +19,15 @@ def manager():
     node._speech_busy = False
     node._speech_handle = None
     node._speech_pending = None
+    node._speech_completion = None
     node._speech_deadline = 0.0
     node._speech_timeout_s = 65.0
     node._tts_client = Mock()
+    node._active = None
+    node._interaction = None
+    node._interaction_reserved = False
+    node._tasks = SimpleNamespace(waiting_task_id="", run_id="run-test")
+    node._status_pub = Mock()
     node._tts_client.send_goal_async.side_effect = lambda goal: Future()
     node.get_logger = Mock(return_value=Mock())
     return node

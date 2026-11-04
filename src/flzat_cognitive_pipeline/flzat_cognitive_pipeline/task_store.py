@@ -33,14 +33,15 @@ _ALLOWED: dict[PipelineState, set[PipelineState]] = {
         PipelineState.WAITING_CLARIFICATION,
         PipelineState.RESPONSE_ONLY,
         PipelineState.REJECTED,
-        PipelineState.COMMAND_READY,
+        PipelineState.HANDOFF_READY,
     },
     PipelineState.WAITING_CLARIFICATION: {PipelineState.CONTEXT_RETRIEVAL},
-    PipelineState.COMMAND_READY: {PipelineState.WRITING_ARTIFACT},
-    PipelineState.WRITING_ARTIFACT: {PipelineState.PUBLISHING_COMMAND},
-    PipelineState.PUBLISHING_COMMAND: {PipelineState.DISPATCHED},
-    PipelineState.DISPATCHED: {
+    PipelineState.HANDOFF_READY: {PipelineState.WRITING_ARTIFACT},
+    PipelineState.WRITING_ARTIFACT: {PipelineState.HANDOFF_PENDING},
+    PipelineState.HANDOFF_PENDING: {PipelineState.HANDOFF_ACCEPTED},
+    PipelineState.HANDOFF_ACCEPTED: {
         PipelineState.LOW_RUNNING,
+        PipelineState.REFUSED,
         PipelineState.SUCCEEDED,
         PipelineState.FAILED,
         PipelineState.CANCELLED,
@@ -92,32 +93,23 @@ class TaskRunStore:
     def accept_transcript(
         self,
         transcript: str,
-        mode: str = "task_command",
         *,
         resume: bool = False,
-        defer_clarification: bool = False,
     ) -> TaskRecord:
         value = transcript.strip()
         if not value:
             raise ValueError("transcript cannot be empty")
-        route_mode = mode.strip()
-        if not route_mode:
-            raise ValueError("task mode cannot be empty")
         if self._waiting_task_id:
             if not resume:
-                raise TaskStateError("pending clarification requires explicit routing")
+                raise TaskStateError("pending clarification requires resume=True")
             task = self._tasks[self._waiting_task_id]
-            if (
-                not defer_clarification
-                and len(task.clarification_history) >= self._max_clarifications
-            ):
+            if len(task.clarification_history) >= self._max_clarifications:
                 raise TaskStateError("clarification limit reached")
             question = task.pending_question
-            if not defer_clarification:
-                task.clarification_history.append((question, value))
-                task.pending_question = ""
+            task.clarification_history.append((question, value))
+            task.pending_question = ""
             task.latest_transcript = value
-            task.mode = route_mode
+            task.mode = "cognitive"
             request_count = self._request_counts[task.task_id] + 1
             self._request_counts[task.task_id] = request_count
             task.request_id = f"{task.task_id}-r{request_count:02d}"
@@ -134,22 +126,11 @@ class TaskRunStore:
             request_id=f"{task_id}-r01",
             original_transcript=value,
             latest_transcript=value,
-            mode=route_mode,
+            mode="cognitive",
         )
         self._tasks[task.task_id] = task
         self.transition(task, PipelineState.CONTEXT_RETRIEVAL, "transcript accepted")
         return task
-
-    def complete_clarification(self, task: TaskRecord) -> None:
-        """Commit an answer only after the router explicitly chose continuation."""
-        if not task.pending_question:
-            raise TaskStateError("no pending question to continue")
-        if len(task.clarification_history) >= self._max_clarifications:
-            raise TaskStateError("clarification limit reached")
-        task.clarification_history.append(
-            (task.pending_question, task.latest_transcript)
-        )
-        task.pending_question = ""
 
     def transition(
         self,
@@ -174,13 +155,16 @@ class TaskRunStore:
         task.pending_question = value
         self._waiting_task_id = task.task_id
 
-    def mark_command(self, task: TaskRecord, command_id: str) -> None:
-        if task.command_id:
-            raise TaskStateError("task already owns a command")
-        value = command_id.strip()
+    def mark_handoff(self, task: TaskRecord, handoff_id: str) -> None:
+        if task.handoff_id:
+            raise TaskStateError("task already owns a handoff")
+        value = handoff_id.strip()
         if not value:
-            raise ValueError("command_id cannot be empty")
-        task.command_id = value
+            raise ValueError("handoff_id cannot be empty")
+        task.handoff_id = value
+
+    def can_request_clarification(self, task: TaskRecord) -> bool:
+        return len(task.clarification_history) < self._max_clarifications
 
     def force_terminal(
         self,

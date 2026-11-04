@@ -3,7 +3,7 @@
 <package format="3">
   <name>flzat_cognitive_pipeline</name>
   <version>0.3.0</version>
-  <description>Task, RAG, prompt, VLM and trusted command orchestration for FLZAT</description>
+  <description>Unified cognitive VLM and High-to-Low handoff orchestration for FLZAT</description>
   <maintainer email="high-system@example.com">FLZAT High System</maintainer>
   <license>Apache-2.0</license>
 

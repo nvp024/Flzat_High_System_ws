@@ -19,6 +19,7 @@ setup(
         (f"share/{package_name}/config", glob("config/*.yaml")),
     ],
     install_requires=["setuptools"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="FLZAT High System",
     maintainer_email="high-system@example.com",
@@ -31,7 +32,6 @@ setup(
             "fake_vlm_server = flzat_high_bringup.fake_servers:vlm_main",
             "static_frame_server = flzat_high_bringup.static_frame_server:main",
             "low_system_mock = flzat_high_bringup.low_system_mock:main",
-            "acceptance_client = flzat_high_bringup.acceptance_client:main",
         ],
     },
 )

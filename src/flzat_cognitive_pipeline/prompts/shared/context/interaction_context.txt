@@ -1,0 +1,2 @@
+interaction_context contains High's current clarification. Interpret its original
+request and question/answer turns together, preserving the user's added details.

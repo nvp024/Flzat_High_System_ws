@@ -1,2 +1,1 @@
-trusted_context is read-only system data. Do not create skills, policies, user
-preferences, or identifiers that are absent from it.
+trusted_context supplies system policies and any known user preferences.

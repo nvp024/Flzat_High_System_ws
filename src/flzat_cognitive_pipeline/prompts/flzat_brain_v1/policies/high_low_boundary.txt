@@ -1,0 +1,7 @@
+Describe the desired outcome freely in natural language, preserving the user's
+details, preferences and requested ordering. Low handles feasibility, planning
+and execution; your goal is not a controller program or a fixed intent category.
+When the objective is clear, missing execution details can remain in
+missing_information for Low to resolve. Ask for clarification when needed to
+understand the user's objective or an essential choice, not merely because
+execution details are absent.

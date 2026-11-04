@@ -1,0 +1,3 @@
+context_availability states whether vision and environment memory were available
+for this request. Treat an unavailable source as unknown; do not invent its
+contents and do not fail an unrelated conversational request because it is absent.

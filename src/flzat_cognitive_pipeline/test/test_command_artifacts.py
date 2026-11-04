@@ -4,155 +4,67 @@ import pytest
 
 from flzat_cognitive_pipeline.artifacts import (
     ArtifactConflictError,
-    CommandArtifactWriter,
+    HandoffArtifactWriter,
     RequestArtifactWriter,
 )
-from flzat_cognitive_pipeline.command import TrustedCommandAssembler, canonical_json
-from flzat_cognitive_pipeline.domain import (
-    ContextItem,
-    ContextSnapshot,
-    ModelDecision,
-    OutcomeKind,
-    PipelineState,
-    ProcessedOutcome,
-    TaskRecord,
-    TrustedPosition,
-)
+from flzat_cognitive_pipeline.command import canonical_json
 
 
-def task():
-    return TaskRecord(
-        run_id="run-20261014T000000Z",
-        task_id="task-0001",
-        request_id="task-0001-r01",
-        original_transcript="get the cup",
-        latest_transcript="get the cup",
-        state=PipelineState.OUTPUT_VALIDATING,
+def handoff_payload() -> str:
+    return canonical_json(
+        {
+            "schema_version": "flzat.high_handoff.v2",
+            "handoff_id": "task-0001-c01",
+            "goal": {"description": "Bring the cup"},
+        }
     )
 
 
-def context(position=True):
-    return ContextSnapshot(
-        "task-0001-r01",
-        "demo",
-        "map",
-        (
-            ContextItem(
-                "memory:cup-1",
-                "environment_object",
-                "cup-1",
-                "water_cup",
-                "A water cup.",
-                ("on:table-1",),
-                "kitchen",
-                0.9,
-                TrustedPosition("map", 5.2, 3.4, 0.8) if position else None,
-            ),
-        ),
-    )
-
-
-def outcome(strategy="direct", refs=("memory:cup-1",)):
-    return ProcessedOutcome(
-        OutcomeKind.READY_FOR_LOW,
-        ModelDecision(
-            intent="fetch_object",
-            target_type="object",
-            target_name="water_cup",
-            selected_context_refs=refs,
-            execution_strategy=strategy,
-            missing_information=(),
-            clarification_question=None,
-            speech="I will ask the robot to fetch it.",
-        ),
-    )
-
-
-def assembler():
-    return TrustedCommandAssembler(
-        clock=lambda: "2026-10-14T00:00:00+00:00",
-    )
-
-
-def test_direct_command_uses_only_trusted_snapshot_coordinates():
-    command_id, payload = assembler().assemble(task(), outcome(), context())
-    value = json.loads(payload)
-
-    assert command_id == "task-0001-c01"
-    assert value["run_id"] == "run-20261014T000000Z"
-    assert value["trusted_context"]["position"] == {
-        "frame_id": "map",
-        "x": 5.2,
-        "y": 3.4,
-        "z": 0.8,
-    }
-    assert value["target"]["memory_id"] == "cup-1"
-    assert payload == canonical_json(value)
-
-
-def test_search_command_has_semantic_hints_but_no_fake_position():
-    _, payload = assembler().assemble(
-        task(), outcome("search", ("memory:cup-1",)), context(position=False)
-    )
-    value = json.loads(payload)
-    assert "position" not in value["trusted_context"]
-    assert value["semantic_hints"] == ["scene:kitchen", "on:table-1"]
-
-
-def test_direct_uses_matching_target_position_not_first_selected_reference():
-    table = ContextItem(
-        "memory:table-1",
-        "environment_object",
-        "table-1",
-        "table",
-        "A table.",
-        (),
-        "kitchen",
-        0.95,
-        TrustedPosition("map", 1.0, 2.0, 0.0),
-    )
-    cup = context().items[0]
-    mixed = ContextSnapshot("task-0001-r01", "demo", "map", (table, cup))
-    selected = outcome("direct", ("memory:table-1", "memory:cup-1"))
-
-    _, payload = assembler().assemble(task(), selected, mixed)
-
-    assert json.loads(payload)["trusted_context"]["position"] == {
-        "frame_id": "map",
-        "x": 5.2,
-        "y": 3.4,
-        "z": 0.8,
-    }
-
-
-def test_artifact_json_jsonl_and_topic_payload_are_byte_identical(tmp_path):
-    command_id, payload = assembler().assemble(task(), outcome(), context())
-    writer = CommandArtifactWriter(tmp_path)
+def test_handoff_json_and_audit_payload_are_byte_identical(tmp_path):
+    payload = handoff_payload()
+    writer = HandoffArtifactWriter(tmp_path)
 
     path = writer.write(
-        "run-20261014T000000Z", "task-0001", command_id, payload
+        "run-20261014T000000Z", "task-0001", "task-0001-c01", payload
     )
     repeated = writer.write(
-        "run-20261014T000000Z", "task-0001", command_id, payload
+        "run-20261014T000000Z", "task-0001", "task-0001-c01", payload
     )
 
     assert repeated == path
     assert path.read_text(encoding="utf-8") == payload
-    audit = tmp_path / "run-20261014T000000Z" / "commands.jsonl"
+    audit = tmp_path / "run-20261014T000000Z" / "handoffs.jsonl"
     assert audit.read_text(encoding="utf-8") == payload + "\n"
     assert not list(path.parent.glob("*.tmp"))
 
 
-def test_duplicate_command_with_other_bytes_is_rejected(tmp_path):
-    command_id, payload = assembler().assemble(task(), outcome(), context())
-    writer = CommandArtifactWriter(tmp_path)
-    writer.write("run-20261014T000000Z", "task-0001", command_id, payload)
-    changed = payload.replace("water_cup", "coffee_mug")
+def test_duplicate_handoff_with_other_bytes_is_rejected(tmp_path):
+    payload = handoff_payload()
+    writer = HandoffArtifactWriter(tmp_path)
+    writer.write("run-20261014T000000Z", "task-0001", "task-0001-c01", payload)
 
     with pytest.raises(ArtifactConflictError):
         writer.write(
-            "run-20261014T000000Z", "task-0001", command_id, changed
+            "run-20261014T000000Z",
+            "task-0001",
+            "task-0001-c01",
+            payload.replace("Bring the cup", "Bring the book"),
         )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", "flzat.high_handoff.v1"),
+    ("handoff_id", "task-0002-c01"),
+])
+def test_handoff_writer_rejects_wrong_schema_or_id(tmp_path, field, value):
+    payload = json.loads(handoff_payload())
+    payload[field] = value
+    with pytest.raises(ValueError, match="schema or handoff ID"):
+        HandoffArtifactWriter(tmp_path).write(
+            "run-20261014T000000Z", "task-0001", "task-0001-c01",
+            canonical_json(payload),
+        )
+    assert not list(tmp_path.rglob("*.json"))
 
 
 def test_request_artifacts_are_atomic_correlated_and_immutable(tmp_path):

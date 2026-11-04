@@ -15,11 +15,11 @@ from flzat_speech.launch_config import speech_arguments, speech_parameters
 
 
 DEFAULT_FAKE_RESPONSE = (
-    '{"intent":"fetch_object","target":{"type":"object",'
-    '"name":"water_cup"},"selected_context_refs":[],'
-    '"execution_strategy":"search","missing_information":[],'
-    '"clarification_question":null,"speech":'
-    '"I will ask the robot to search for the water cup."}'
+    '{"speech":"I will ask the robot to find the water cup.",'
+    '"goal":{"description":"Find the water cup requested by the user",'
+    '"constraints":[],"selected_context_refs":[],'
+    '"missing_information":["current water cup location"]},'
+    '"interaction":null}'
 )
 
 
@@ -27,10 +27,6 @@ def generate_launch_description():
     config = (
         get_package_share_directory("flzat_high_bringup")
         + "/config/high_system.yaml"
-    )
-    intent_routes = (
-        get_package_share_directory("flzat_cognitive_pipeline")
-        + "/config/intent_routes.yaml"
     )
     vision = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -81,7 +77,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("embedding_backend", default_value="sentence_transformer"),
         DeclareLaunchArgument("embedding_local_files_only", default_value="false"),
-        DeclareLaunchArgument("output_root", default_value="~/.local/share/flzat/high_system/commands"),
+        DeclareLaunchArgument("output_root", default_value="~/.local/share/flzat/high_system/handoffs"),
         DeclareLaunchArgument("enable_text_command", default_value="false"),
         DeclareLaunchArgument("use_fake_speech", default_value="false"),
         DeclareLaunchArgument("use_fake_vlm", default_value="false"),
@@ -117,8 +113,6 @@ def generate_launch_description():
         DeclareLaunchArgument("request_timeout_s", default_value="60.0"),
         DeclareLaunchArgument("max_repair_attempts", default_value="2"),
         DeclareLaunchArgument("health_period_s", default_value="2.0"),
-        DeclareLaunchArgument("intent_routes_path", default_value=intent_routes),
-        DeclareLaunchArgument("skill_registry_path", default_value=""),
         DeclareLaunchArgument("safety_policy_path", default_value=""),
         DeclareLaunchArgument("user_profile_path", default_value=""),
         DeclareLaunchArgument("vlm_backend", default_value="qwen3_vl"),
@@ -139,19 +133,21 @@ def generate_launch_description():
         DeclareLaunchArgument("fake_transcript", default_value="go to the water cup"),
         DeclareLaunchArgument("fake_vlm_response", default_value=DEFAULT_FAKE_RESPONSE),
         DeclareLaunchArgument("fake_vlm_second_response", default_value=""),
-        DeclareLaunchArgument(
-            "fake_routing_response",
-            default_value='{"mode":null,"relation_to_pending":"new_request",'
-            '"needs_clarification":true,'
-            '"clarification_question":"Could you clarify your request?"}',
-        ),
         DeclareLaunchArgument("fake_vlm_delay_s", default_value="0.0"),
         DeclareLaunchArgument("fake_vlm_ignore_cancel", default_value="false"),
         DeclareLaunchArgument("low_transition_delay_s", default_value="0.1"),
-        DeclareLaunchArgument("low_terminal_state", default_value="succeeded"),
+        DeclareLaunchArgument("low_result_outcome", default_value="STARTED_PLAN"),
         DeclareLaunchArgument(
             "low_failure_error", default_value="configured Low System failure"
         ),
+        DeclareLaunchArgument("low_ask_user_kind", default_value=""),
+        DeclareLaunchArgument(
+            "low_ask_user_content_hint",
+            default_value="Which object do you mean?",
+        ),
+        DeclareLaunchArgument("low_ask_user_timeout_s", default_value="30.0"),
+        DeclareLaunchArgument("low_ask_user_retry_interval_s", default_value="1.0"),
+        DeclareLaunchArgument("low_ask_user_max_attempts", default_value="10"),
         vision,
         Node(
             package="flzat_high_bringup",
@@ -239,23 +235,6 @@ def generate_launch_description():
             output="screen",
             parameters=[speech_parameters("ingress")],
         ),
-        Node(
-            package="flzat_cognitive_pipeline",
-            executable="intent_router",
-            name="intent_router",
-            output="screen",
-            parameters=[config, {
-                "config_file": LaunchConfiguration("intent_routes_path"),
-                "embedding_backend": LaunchConfiguration("embedding_backend"),
-                "embedding_device": "cpu",
-                "embedding_local_files_only": ParameterValue(
-                    LaunchConfiguration("embedding_local_files_only"), value_type=bool
-                ),
-                "enable_text_command": ParameterValue(
-                    LaunchConfiguration("enable_text_command"), value_type=bool
-                ),
-            }],
-        ),
         real_vlm,
         Node(
             package="flzat_high_bringup",
@@ -276,9 +255,6 @@ def generate_launch_description():
                 "second_response_text": ParameterValue(
                     LaunchConfiguration("fake_vlm_second_response"), value_type=str
                 ),
-                "routing_response_text": ParameterValue(
-                    LaunchConfiguration("fake_routing_response"), value_type=str
-                ),
             }],
         ),
         Node(
@@ -293,8 +269,9 @@ def generate_launch_description():
                 "environment_id": LaunchConfiguration("environment_id"),
                 "map_id": LaunchConfiguration("map_id"),
                 "output_root": LaunchConfiguration("output_root"),
-                "context_policy_path": LaunchConfiguration("intent_routes_path"),
-                "skill_registry_path": LaunchConfiguration("skill_registry_path"),
+                "enable_text_command": ParameterValue(
+                    LaunchConfiguration("enable_text_command"), value_type=bool
+                ),
                 "safety_policy_path": LaunchConfiguration("safety_policy_path"),
                 "user_profile_path": LaunchConfiguration("user_profile_path"),
                 "request_timeout_s": ParameterValue(
@@ -315,9 +292,22 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_low_mock")),
             parameters=[{
-                "status_sequence": ["accepted"],
-                "terminal_state": LaunchConfiguration("low_terminal_state"),
+                "result_outcome": LaunchConfiguration("low_result_outcome"),
                 "failure_error": LaunchConfiguration("low_failure_error"),
+                "ask_user_kind": LaunchConfiguration("low_ask_user_kind"),
+                "ask_user_content_hint": LaunchConfiguration(
+                    "low_ask_user_content_hint"
+                ),
+                "ask_user_timeout_s": ParameterValue(
+                    LaunchConfiguration("low_ask_user_timeout_s"), value_type=float
+                ),
+                "ask_user_retry_interval_s": ParameterValue(
+                    LaunchConfiguration("low_ask_user_retry_interval_s"),
+                    value_type=float,
+                ),
+                "ask_user_max_attempts": ParameterValue(
+                    LaunchConfiguration("low_ask_user_max_attempts"), value_type=int
+                ),
                 "transition_delay_s": ParameterValue(
                     LaunchConfiguration("low_transition_delay_s"), value_type=float
                 ),

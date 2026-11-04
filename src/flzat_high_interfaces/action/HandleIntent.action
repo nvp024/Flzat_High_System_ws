@@ -1,0 +1,14 @@
+# High writes the complete handoff JSON before sending this goal.
+# Compact v2 file layout: <shared_root>/<run_id>/<task_id>/<handoff_id>.json.
+string run_id
+string task_id
+string handoff_id
+string json_path
+---
+# STARTED_FAST | STARTED_PLAN | REFUSED | FAILED | CANCELED
+string outcome
+string detail
+---
+# deciding | validating | planning | waiting_for_user
+string stage
+string detail

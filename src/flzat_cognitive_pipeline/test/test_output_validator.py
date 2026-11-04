@@ -2,170 +2,86 @@ import json
 
 import pytest
 
-from flzat_cognitive_pipeline.domain import (
-    ContextItem,
-    ContextSnapshot,
-    OutcomeKind,
-    TrustedPosition,
-)
+from flzat_cognitive_pipeline.domain import ContextSnapshot, OutcomeKind
 from flzat_cognitive_pipeline.output_validator import (
-    ModeOutputValidator,
+    CognitiveOutputValidator,
     RepairPolicy,
 )
 
 
-def snapshot():
-    return ContextSnapshot(
-        request_id="task-0001-r01",
-        environment_id="demo",
-        map_id="map",
-        items=(
-            ContextItem(
-                context_ref="memory:book-1",
-                kind="environment_object",
-                object_id="book-1",
-                label="book",
-                description="A book on a table.",
-                relationships=("on:table-1",),
-                scene="living_room",
-                retrieval_score=0.9,
-                position=TrustedPosition("map", 1.0, 2.0, 0.5),
-            ),
-        ),
+def snapshot(request_id="request-1"):
+    return ContextSnapshot(request_id, "demo", "map", ())
+
+
+def validate(value, request_id="request-1"):
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return CognitiveOutputValidator().validate(
+        raw,
+        snapshot(request_id),
+        expected_request_id=request_id,
     )
 
 
-def validate(mode, value):
-    return ModeOutputValidator(["navigate", "fetch_object"]).validate(
-        mode,
-        json.dumps(value),
-        snapshot(),
-        expected_request_id="task-0001-r01",
-    )
-
-
-def test_visual_qa_schema_is_strict():
-    result = validate(
-        "visual_qa",
+def test_response_only_goal_and_clarification_are_distinct():
+    reply = validate({"speech": "Hello.", "goal": None, "interaction": None})
+    goal = validate(
         {
-            "reply": "There is a book on the table.",
-            "observed_objects": ["book", "table"],
-            "confidence": 0.91,
-        },
+            "speech": "I will pass that goal to the robot.",
+            "goal": {
+                "description": "Move near the user",
+                "constraints": ["Approach safely"],
+                "selected_context_refs": [],
+                "missing_information": [],
+            },
+            "interaction": None,
+        }
     )
-    assert result.valid
-    assert result.kind == OutcomeKind.RESPONSE_ONLY
-    assert result.value["observed_objects"] == ["book", "table"]
-
-
-def test_general_qa_cannot_request_robot_action():
-    accepted = validate(
-        "general_qa",
+    ask = validate(
         {
-            "reply": "Beijing is the capital of China.",
-            "speak": True,
-            "requires_robot_action": False,
-        },
+            "speech": "",
+            "goal": None,
+            "interaction": {"kind": "ASK", "question": "Which bottle?"},
+        }
     )
-    rejected = validate(
-        "general_qa",
-        {
-            "reply": "I will navigate there.",
-            "speak": True,
-            "requires_robot_action": True,
-        },
+
+    assert reply.kind == OutcomeKind.RESPONSE_ONLY
+    assert goal.kind == OutcomeKind.READY_FOR_LOW
+    assert ask.kind == OutcomeKind.NEEDS_CLARIFICATION
+
+
+def test_json_fence_is_normalized_but_schema_is_not_repaired():
+    fenced = validate(
+        "```json\n"
+        '{"speech":"Hello.","goal":null,"interaction":null}'
+        "\n```"
     )
-    assert accepted.valid
-    assert not rejected.valid
-    assert "cannot require robot action" in rejected.error
+    malformed = validate('{"speech":"Hello."}')
+
+    assert fenced.valid
+    assert not malformed.valid
+    assert "schema" in malformed.error
 
 
-def test_social_skill_must_exist_in_trusted_registry():
-    accepted = validate(
-        "social_dialogue",
-        {"reply": "Would you like me to help?", "speak": True, "suggested_skill": "navigate"},
-    )
-    rejected = validate(
-        "social_dialogue",
-        {"reply": "I can fly.", "speak": True, "suggested_skill": "fly"},
-    )
-    assert accepted.valid
-    assert not rejected.valid
-    assert "trusted registry" in rejected.error
-
-
-def test_clarification_is_one_question_and_never_a_command():
-    accepted = validate("clarification", {"reply": "Which book do you mean?"})
-    rejected = validate("clarification", {"reply": "I will get the book."})
-    assert accepted.kind == OutcomeKind.NEEDS_CLARIFICATION
-    assert accepted.valid
-    assert not rejected.valid
-
-
-def test_cross_mode_schema_is_rejected():
-    visual = {
-        "reply": "A book.",
-        "observed_objects": ["book"],
-        "confidence": 0.8,
-    }
-    assert not validate("general_qa", visual).valid
-    assert not validate("social_dialogue", visual).valid
-    assert not validate("clarification", visual).valid
-
-
-def test_task_validator_rejects_model_generated_coordinates():
-    value = {
-        "intent": "fetch_object",
-        "target": {"type": "object", "name": "book"},
-        "selected_context_refs": ["memory:book-1"],
-        "execution_strategy": "direct",
-        "missing_information": [],
-        "clarification_question": None,
-        "speech": "I will fetch the book.",
-        "coordinates": {"x": 99.0, "y": 99.0},
-    }
-    result = validate("task_command", value)
-    assert not result.valid
-    assert "fields" in result.error
-
-
-def test_task_validator_produces_original_trusted_outcome():
-    value = {
-        "intent": "fetch_object",
-        "target": {"type": "object", "name": "book"},
-        "selected_context_refs": ["memory:book-1"],
-        "execution_strategy": "direct",
-        "missing_information": [],
-        "clarification_question": None,
-        "speech": "I will fetch the book.",
-    }
-    result = validate("task_command", value)
-    assert result.valid
-    assert result.kind == OutcomeKind.READY_FOR_LOW
-    assert result.task_outcome is not None
-
-
-def test_json_fence_is_normalized_but_nested_fence_is_rejected():
-    validator = ModeOutputValidator([])
-    raw = '```json\n{"reply":"Beijing.","speak":true,"requires_robot_action":false}\n```'
+def test_stale_snapshot_is_rejected():
+    validator = CognitiveOutputValidator()
     result = validator.validate(
-        "general_qa", raw, snapshot(), expected_request_id="task-0001-r01"
+        '{"speech":"Hello.","goal":null,"interaction":null}',
+        snapshot("old-request"),
+        expected_request_id="new-request",
     )
-    nested = validator.validate(
-        "general_qa",
-        "```json\n```\n{}\n```",
-        snapshot(),
-        expected_request_id="task-0001-r01",
-    )
-    assert result.valid
-    assert not nested.valid
+
+    assert not result.valid
+    assert "stale" in result.error
 
 
-def test_repair_policy_stops_after_two_repairs():
+@pytest.mark.parametrize("maximum", [-1, 3])
+def test_repair_policy_has_bounded_attempts(maximum):
+    with pytest.raises(ValueError):
+        RepairPolicy(maximum)
+
+
+def test_repair_policy_stops_after_configured_limit():
     policy = RepairPolicy(2)
     assert policy.next_repair_number(1) == 1
     assert policy.next_repair_number(2) == 2
     assert policy.next_repair_number(3) is None
-    with pytest.raises(ValueError):
-        RepairPolicy(3)
-

@@ -23,13 +23,13 @@ def test_full_launch_can_switch_real_and_fake_boundaries():
     assert 'EqualsSubstitution(LaunchConfiguration("frame_source"), "static")' in source
     assert 'executable="static_frame_server"' in source
     assert 'executable="cognitive_manager"' in source
-    assert 'executable="intent_router"' in source
+    assert 'executable="intent_router"' not in source
     assert 'executable="speech_ingress"' in source
     assert 'executable="memory_query_node"' in source
-    assert 'DeclareLaunchArgument("intent_routes_path"' in source
-    assert '"config_file": LaunchConfiguration("intent_routes_path")' in source
-    assert '"context_policy_path": LaunchConfiguration("intent_routes_path")' in source
-    assert 'DeclareLaunchArgument("skill_registry_path"' in source
+    assert 'DeclareLaunchArgument("intent_routes_path"' not in source
+    assert '"context_policy_path"' not in source
+    assert '"enable_text_command": ParameterValue(' in source
+    assert 'DeclareLaunchArgument("skill_registry_path"' not in source
     assert 'DeclareLaunchArgument("safety_policy_path"' in source
     assert 'DeclareLaunchArgument("user_profile_path"' in source
     assert 'DeclareLaunchArgument("max_repair_attempts"' in source
@@ -60,14 +60,14 @@ def test_local_io_launch_owns_only_hardware_boundaries():
     assert 'speech_parameters("tts")' in source
 
 
-def test_low_mock_supports_lifecycle_and_cancel_contracts():
+def test_low_mock_supports_action_a_b_contracts():
     source = (ROOT / "flzat_high_bringup/low_system_mock.py").read_text(
         encoding="utf-8"
     )
 
-    assert "status_sequence" in source
-    assert '"running"' in source
-    assert '"succeeded"' in source
-    assert '"failed"' in source
-    assert '"cancelled"' in source
-    assert '"flzat.low_cancel.v2"' in source
+    assert '"/llm/handle_intent"' in source
+    assert '"/brain/ask_user"' in source
+    assert '"STARTED_FAST"' in source
+    assert '"STARTED_PLAN"' in source
+    assert '"REFUSED"' in source
+    assert "is_cancel_requested" in source

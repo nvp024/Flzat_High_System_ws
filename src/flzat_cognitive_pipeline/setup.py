@@ -30,6 +30,7 @@ setup(
         *prompt_data_files(),
     ],
     install_requires=["setuptools"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="FLZAT High System",
     maintainer_email="high-system@example.com",
@@ -38,7 +39,6 @@ setup(
     entry_points={
         "console_scripts": [
             "cognitive_manager = flzat_cognitive_pipeline.cognitive_manager:main",
-            "intent_router = flzat_cognitive_pipeline.intent_router:main",
         ],
     },
 )

@@ -1,0 +1,17 @@
+Use these three fields:
+{"speech":"","goal":null,"interaction":null}
+
+speech: the spoken reply, or "" when no reply is useful.
+
+goal is null or exactly:
+{"description":"natural-language objective","constraints":[],"selected_context_refs":[],"missing_information":[]}
+
+interaction is null or exactly:
+{"kind":"ASK","question":"one concise question?"}
+
+description and question are nonempty strings. The three goal arrays contain
+strings; use [] when empty. Copy selected_context_refs exactly from the input.
+Put known requirements in constraints and unresolved details in missing_information.
+When asking, set goal to null and speech to ""; interaction.question is the
+complete spoken question, on one line ending in "?". Otherwise interaction is null.
+For speech only, goal is also null. At least one field must carry content.

@@ -61,9 +61,11 @@ class PromptComposer:
         context_items: list[dict[str, Any]],
         context_refs: tuple[str, ...],
         dialogue_history: list[dict[str, str]],
-        mode: str = "task_command",
+        mode: str = "cognitive",
         trusted_context: dict[str, Any] | None = None,
         include_rag_context: bool = True,
+        context_availability: dict[str, Any] | None = None,
+        interaction_context: dict[str, Any] | None = None,
     ) -> ComposedPrompt:
         if not transcript.strip():
             raise ValueError("transcript is required")
@@ -84,10 +86,7 @@ class PromptComposer:
                 f"prompt profile {profile.name} does not allow trusted context"
             )
 
-        runtime: dict[str, Any] = {
-            "english_transcript": transcript.strip(),
-            "router_mode": route_mode,
-        }
+        runtime: dict[str, Any] = {"english_transcript": transcript.strip()}
         user_files = list(profile.user_sections)
         if dialogue_history:
             runtime["dialogue_history"] = dialogue_history
@@ -98,6 +97,22 @@ class PromptComposer:
         if trusted_context:
             runtime["trusted_context"] = trusted_context
             user_files.append(profile.optional_sections["trusted_context"])
+        if context_availability is not None:
+            section = profile.optional_sections.get("context_availability")
+            if section is None:
+                raise ValueError(
+                    f"prompt profile {profile.name} does not allow context availability"
+                )
+            runtime["context_availability"] = context_availability
+            user_files.append(section)
+        if interaction_context is not None:
+            section = profile.optional_sections.get("interaction_context")
+            if section is None:
+                raise ValueError(
+                    f"prompt profile {profile.name} does not allow interaction context"
+                )
+            runtime["interaction_context"] = interaction_context
+            user_files.append(section)
         user_files.append(profile.output_section)
 
         runtime_json = json.dumps(
@@ -159,25 +174,6 @@ class PromptComposer:
             sections_are_complete=True,
         )
 
-    def compose_routing(
-        self, transcript: str, pending: dict[str, Any] | None,
-    ) -> ComposedPrompt:
-        """Compose a short, text-only classifier request without RAG or vision."""
-        system = self._join(("routing/system.txt",))
-        user = self._join(("routing/task.txt", "routing/output.txt"))
-        user += "\n\nRUNTIME_INPUT_JSON\n" + json.dumps(
-            {"latest_utterance": transcript, "pending_request": pending},
-            ensure_ascii=False, sort_keys=True, allow_nan=False,
-        )
-        return ComposedPrompt(
-            system_prompt=system, user_prompt=user, profile="flzat_routing_v1",
-            version="1.1.0", mode="routing", output_schema="SemanticRoute.v1",
-            validator="semantic_route_v1",
-            prompt_hash=hashlib.sha256((system + "\0" + user).encode()).hexdigest(),
-            sections=("routing/system.txt", "routing/task.txt", "routing/output.txt"),
-            context_refs=(),
-        )
-
     def _discover_profiles(self) -> dict[str, PromptProfile]:
         profiles: dict[str, PromptProfile] = {}
         for manifest_path in sorted(self.root.glob("*/manifest.json")):
@@ -208,15 +204,21 @@ class PromptComposer:
         if not isinstance(optional_raw, dict):
             raise ValueError("optional_sections must be a mapping")
         optional: dict[str, str] = {}
-        allowed_optional = {"rag_context", "dialogue_history", "trusted_context"}
+        allowed_optional = {
+            "rag_context",
+            "dialogue_history",
+            "trusted_context",
+            "context_availability",
+            "interaction_context",
+        }
         if any(key not in allowed_optional for key in optional_raw):
             raise ValueError("manifest contains an unsupported optional section")
         for key, value in optional_raw.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"optional section {key} is invalid")
             optional[key] = self._checked_relative_file(value)
-        if mode == "task_command" and "rag_context" not in optional:
-            raise ValueError("task_command profile requires rag_context")
+        if mode == "cognitive" and "rag_context" not in optional:
+            raise ValueError("cognitive profile requires rag_context")
         return PromptProfile(
             name=name,
             version=version,

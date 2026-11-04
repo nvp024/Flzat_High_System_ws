@@ -1,0 +1,27 @@
+{
+  "profile": "flzat_brain_v1",
+  "version": "1.2.0",
+  "mode": "cognitive",
+  "model_family": "qwen3_vl",
+  "output_schema": "CognitiveDecision.v1",
+  "validator": "cognitive_decision_v1",
+  "system_sections": [
+    "shared/system/identity.txt",
+    "flzat_brain_v1/system/cognitive_role.txt",
+    "shared/policies/safety.txt",
+    "flzat_brain_v1/policies/high_low_boundary.txt",
+    "flzat_brain_v1/policies/grounding.txt",
+    "shared/policies/json_only.txt"
+  ],
+  "user_sections": [
+    "flzat_brain_v1/tasks/understand_and_respond.txt"
+  ],
+  "optional_sections": {
+    "rag_context": "shared/context/rag_context.txt",
+    "dialogue_history": "shared/context/dialogue_history.txt",
+    "trusted_context": "shared/context/trusted_context.txt",
+    "context_availability": "shared/context/context_availability.txt",
+    "interaction_context": "shared/context/interaction_context.txt"
+  },
+  "output_section": "flzat_brain_v1/output/cognitive_decision_v1.txt"
+}

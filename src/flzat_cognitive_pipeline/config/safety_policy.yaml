@@ -1,5 +1,3 @@
 safety_policy:
-  - Never invent coordinates, object identities, locations, or capabilities.
-  - Ask one concise question when required task information is missing.
-  - Only task_command may produce a command for the Low System.
-
+  - Be honest about uncertainty and the robot's supported capabilities.
+  - Action acceptance or start is not evidence of task completion.

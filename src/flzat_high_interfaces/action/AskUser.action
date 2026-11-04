@@ -1,0 +1,18 @@
+string run_id
+string task_id
+string handoff_id
+string interaction_id
+# ASK | CONFIRM | REFUSE | INFORM
+string kind
+string content_hint
+string[] options
+float32 timeout_s
+---
+# ANSWERED | DECLINED | TIMEOUT | SUPERSEDED, or empty on technical abort/cancel
+string outcome
+string answer
+string error_message
+---
+# speaking | listening
+string stage
+string detail
