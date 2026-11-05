@@ -53,7 +53,7 @@ def test_prompt_is_modular_versioned_and_deterministic():
     second = build(composer)
 
     assert first.profile == "flzat_brain_v1"
-    assert first.version == "1.2.0"
+    assert first.version == "1.3.0"
     assert first.prompt_hash == second.prompt_hash
     assert first.context_refs == ("memory:cup-1",)
     assert "shared/context/rag_context.txt" in first.sections

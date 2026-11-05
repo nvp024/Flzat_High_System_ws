@@ -96,7 +96,9 @@ class AdaptiveContextBuilder:
                 "user_profile": self._profile.get(),
                 "high_low_boundary": {
                     "high_responsibility": (
-                        "understand the user and hand off a natural-language goal"
+                        "understand the situation, respond directly to the user, "
+                        "and hand off a natural-language goal only when further "
+                        "action is needed"
                     ),
                     "low_responsibility": (
                         "classify, plan, select skills, and execute the goal"
