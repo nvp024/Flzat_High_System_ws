@@ -245,7 +245,7 @@ class TtsNode(Node):
     """A single-speaker TTS action server with explicit VAD muting state."""
 
     def __init__(self) -> None:
-        super().__init__("tts_node")
+        super().__init__("speech_output")
 
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
@@ -313,7 +313,8 @@ class TtsNode(Node):
         if self._speech_timeout_s <= 0.0 or self._cancel_grace_s <= 0.0:
             raise ValueError("TTS timeout parameters must be greater than zero.")
 
-        self.get_logger().info(f"Loading Piper voice from {piper_model_path} …")
+        self.get_logger().info("[TTS] Loading Piper voice.")
+        self.get_logger().debug(f"Piper voice path: {piper_model_path}")
         self._engine = _PiperEngine(
             self._stop_event,
             piper_model_path,
@@ -343,9 +344,8 @@ class TtsNode(Node):
             callback_group=self._cb_group,
         )
         self._publish_tts_active(False)
-        self.get_logger().info(
-            f"TtsNode ready — Piper; /tts_action active; VAD state on {tts_active_topic}."
-        )
+        self.get_logger().info("[TTS] Ready; backend=Piper.")
+        self.get_logger().debug(f"TTS action=/tts_action; VAD state={tts_active_topic}.")
 
     def _publish_tts_active(self, active: bool) -> None:
         self._tts_active_pub.publish(Bool(data=active))
@@ -353,13 +353,13 @@ class TtsNode(Node):
     def _goal_callback(self, goal_request) -> GoalResponse:
         text = goal_request.text.strip()
         if not text:
-            self.get_logger().warn("Rejected empty TTS goal.")
+            self.get_logger().warn("[TTS] Rejected empty goal.")
             return GoalResponse.REJECT
 
         with self._state_lock:
             if self._goal_reserved or self._shutting_down:
                 self.get_logger().warn(
-                    "Rejected TTS goal because another speech request is active."
+                    "[TTS] Rejected goal; another speech request is active."
                 )
                 return GoalResponse.REJECT
             self._goal_reserved = True
@@ -368,7 +368,7 @@ class TtsNode(Node):
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle) -> CancelResponse:
-        self.get_logger().info("TTS cancel request — stopping engine.")
+        self.get_logger().info("[TTS] Cancel requested; stopping playback.")
         self._stop_event.set()
         with self._state_lock:
             engine = self._active_engine
@@ -400,7 +400,7 @@ class TtsNode(Node):
     def _execute_speech(self, goal_handle):
         text = goal_handle.request.text.strip()
         token = object()
-        self.get_logger().info(f"[TTS] '{text}'")
+        self.get_logger().debug(f"[TTS] {text!r}")
 
         self._stop_event.clear()
         with self._state_lock:
@@ -451,7 +451,7 @@ class TtsNode(Node):
                 engine.request_stop()
                 if not speech_done.wait(timeout=self._cancel_grace_s):
                     self.get_logger().error(
-                        "TTS engine did not stop before the timeout grace period; "
+                        "[TTS] Engine did not stop before the timeout grace period; "
                         "rejecting future TTS goals until its worker exits."
                     )
                 break
@@ -466,15 +466,15 @@ class TtsNode(Node):
 
         result = TextToSpeech.Result()
         if goal_handle.is_cancel_requested:
-            self.get_logger().info("TTS goal cancelled.")
+            self.get_logger().info("[TTS] Cancelled.")
             goal_handle.canceled()
             result.success = False
         elif timed_out.is_set():
-            self.get_logger().error("TTS goal timed out.")
+            self.get_logger().error("[TTS] Playback timed out.")
             goal_handle.abort()
             result.success = False
         elif not success_container[0]:
-            self.get_logger().error(f"TTS engine failed: {engine.last_error or 'unknown error'}")
+            self.get_logger().error(f"[TTS] Engine failed: {engine.last_error or 'unknown error'}")
             goal_handle.abort()
             result.success = False
         else:
@@ -511,7 +511,7 @@ def main(args=None) -> None:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         if node is not None:
-            node.get_logger().info("TtsNode shutting down …")
+            node.get_logger().info("[TTS] Shutting down…")
     finally:
         if node is not None:
             node._shutting_down = True

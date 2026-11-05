@@ -26,7 +26,7 @@ def generate_launch_description():
         Node(
             package="flzat_memory",
             executable="memory_query_node",
-            name="memory_query_node",
+            name="knowledge_server",
             output="screen",
             parameters=[{
                 "environment_id": LaunchConfiguration("environment_id"),

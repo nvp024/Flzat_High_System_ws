@@ -1,4 +1,4 @@
-cognitive_manager:
+vlm_brain:
   ros__parameters:
     rag_top_k: 5
     rag_minimum_score: -1.0
@@ -17,7 +17,7 @@ cognitive_manager:
     user_profile_path: ""
     rejection_speech: I could not safely process that request.
 
-memory_query_node:
+knowledge_server:
   ros__parameters:
     embedding_device: cpu
     embedding_backend: sentence_transformer

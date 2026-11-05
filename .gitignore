@@ -37,8 +37,9 @@ Thumbs.db
 *.swo
 *~
 
-# Markdown documentation (keep README files at any directory level)
+# Local documentation (ignore docs entirely, including its README files)
+/docs/
+
+# Ignore Markdown files except README.md at any directory level outside docs
 *.[mM][dD]
 ![rR][eE][aA][dD][mM][eE].[mM][dD]
-!docs/HIGH_SYSTEM_COGNITIVE_REFACTOR_PLAN.md
-!docs/HIGH_LOW_ACTION_CONTRACT.md

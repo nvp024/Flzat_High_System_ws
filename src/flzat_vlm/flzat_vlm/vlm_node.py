@@ -41,7 +41,7 @@ class VlmNode(Node):
     """One Qwen3-VL backend serving precomposed cognitive requests."""
 
     def __init__(self) -> None:
-        super().__init__("vlm_node")
+        super().__init__("qwen_inference")
         self._callback_group = ReentrantCallbackGroup()
         self._broker = PriorityInferenceBroker()
         self._cancel_tokens = GoalCancellationRegistry()
@@ -67,7 +67,7 @@ class VlmNode(Node):
             "/vlm/raw_response",
             raw_response_qos,
         )
-        self.get_logger().info("Cognitive requests require precomposed prompts.")
+        self.get_logger().debug("Cognitive requests require precomposed prompts.")
 
         config = BackendConfig(
             model_id=model_id,
@@ -81,7 +81,10 @@ class VlmNode(Node):
             max_image_pixels=self._integer_parameter("qwen_max_image_pixels"),
         )
         self.get_logger().info(
-            f"Loading VLM: backend={backend_name}, model={model_id}, "
+            f"[VLM] Loading {model_id}; device={config.device}"
+        )
+        self.get_logger().debug(
+            f"VLM configuration: backend={backend_name}, "
             f"device={config.device}, dtype={config.dtype}, "
             f"quantization={config.quantization}."
         )
@@ -92,13 +95,13 @@ class VlmNode(Node):
         except Exception as exc:
             available = ", ".join(available_backends())
             self.get_logger().fatal(
-                f"VLM initialization failed: {exc}. Available backends: {available}."
+                f"[VLM] Initialization failed: {exc}. Available backends: {available}."
             )
             raise RuntimeError(f"VLM initialization failed: {exc}") from exc
         self.get_logger().info(
-            f"VLM ready: backend={self._backend.name}, "
+            f"[VLM] Ready; backend={self._backend.name}; "
             f"device={self._backend.device_description}, "
-            f"initialization={time.perf_counter() - started:.2f} s."
+            f"load={time.perf_counter() - started:.2f}s"
         )
 
         self._run_action_server = ActionServer(
@@ -110,7 +113,7 @@ class VlmNode(Node):
             cancel_callback=self._on_cancel,
             callback_group=self._callback_group,
         )
-        self.get_logger().info("VLM action ready on /vlm/run.")
+        self.get_logger().debug("VLM action ready on /vlm/run.")
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("backend", "qwen3_vl")
@@ -131,7 +134,7 @@ class VlmNode(Node):
 
     def _on_run_goal(self, goal_request: RunVlm.Goal) -> GoalResponse:
         if not goal_request.transcript.strip():
-            self.get_logger().warn("Rejected VLM goal without a transcript.")
+            self.get_logger().warn("[VLM] Rejected goal without a transcript.")
             return GoalResponse.REJECT
         prompt_values = (
             goal_request.system_prompt.strip(),
@@ -141,19 +144,21 @@ class VlmNode(Node):
             goal_request.request_id.strip(),
         )
         if not all(prompt_values):
-            self.get_logger().warn("Rejected request without complete composed prompt metadata.")
+            self.get_logger().warn("[VLM] Rejected request without complete composed prompt metadata.")
             return GoalResponse.REJECT
         expected_hash = hashlib.sha256(
             (prompt_values[0] + "\0" + prompt_values[1]).encode("utf-8")
         ).hexdigest()
         if prompt_values[3] != expected_hash:
-            self.get_logger().warn("Rejected precomposed prompt hash mismatch.")
+            self.get_logger().warn("[VLM] Rejected request; precomposed prompt hash mismatch.")
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
     def _on_cancel(self, goal_handle) -> CancelResponse:
         if self._cancel_tokens.request_cancel(goal_handle):
-            self.get_logger().info("Cooperative VLM cancellation was signalled.")
+            self.get_logger().info(
+                f"[VLM] {goal_handle.request.request_id}: cancel requested"
+            )
         return CancelResponse.ACCEPT
 
     def _execute_run(self, goal_handle):
@@ -204,9 +209,9 @@ class VlmNode(Node):
             goal_handle.succeed()
             self._publish_run_feedback(goal_handle, "complete")
             inference_s = time.perf_counter() - inference_started
-            self.get_logger().info(f"[VLM] Completed in {inference_s:.2f} s")
             self.get_logger().debug(
-                f"VLM response ({inference_s:.2f} s): '{raw_response[:500]}'"
+                f"VLM {request.request_id} response (generation={inference_s:.2f}s): "
+                f"{raw_response!r}"
             )
             return result
         except GenerationCancelled:
@@ -214,7 +219,7 @@ class VlmNode(Node):
         except Exception as exc:
             if ticket is not None and token.is_set():
                 return self._cancel_or_preempt_run(goal_handle, result, ticket)
-            self.get_logger().error(f"VLM request failed: {exc}")
+            self.get_logger().error(f"[VLM] {result.request_id}: failed: {exc}")
             goal_handle.abort()
             result.success = False
             result.response_text = ""
@@ -323,7 +328,7 @@ def main(args=None) -> None:
         executor.spin()
     except KeyboardInterrupt:
         if node is not None:
-            node.get_logger().info("VlmNode shutting down …")
+            node.get_logger().info("[VLM] Shutting down…")
     finally:
         if executor is not None:
             executor.shutdown(timeout_sec=2.0)

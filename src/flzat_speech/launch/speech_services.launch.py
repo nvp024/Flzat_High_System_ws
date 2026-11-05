@@ -20,7 +20,7 @@ def generate_launch_description():
             parameters=[speech_parameters("stt")],
         ),
         Node(
-            package="flzat_speech", executable="tts_node", name="tts_node",
+            package="flzat_speech", executable="tts_node", name="speech_output",
             output="screen", emulate_tty=True,
             parameters=[speech_parameters("tts")],
         ),

@@ -139,7 +139,7 @@ class LowSystemMock(Node):
             "/brain/ask_user",
             callback_group=self._cb_group,
         )
-        self.get_logger().info("Low mock ready: Action A server and Action B client.")
+        self.get_logger().info("[ACTION_A] Server ready; backend=low_mock.")
 
     def _on_high_status(self, message: String) -> None:
         try:
@@ -172,14 +172,14 @@ class LowSystemMock(Node):
                 self._handoffs.add(key)
             return GoalResponse.ACCEPT
         except Exception as exc:
-            self.get_logger().warn(f"Rejected Action A goal: {exc}")
+            self.get_logger().warn(f"[ACTION_A] Rejected goal: {exc}")
             return GoalResponse.REJECT
 
     def _execute_intent(self, goal_handle) -> HandleIntent.Result:
         request = goal_handle.request
         try:
             payload = self._read_handoff(request)
-            self.get_logger().info(
+            self.get_logger().debug(
                 f"[ACTION_A] accepted {request.handoff_id} from {request.json_path}"
             )
             for stage in self._feedback_stages:
@@ -199,7 +199,7 @@ class LowSystemMock(Node):
                         goal_handle,
                         "Action B could not be established or completed",
                     )
-                self.get_logger().info(
+                self.get_logger().debug(
                     "[ACTION_B] "
                     f"{interaction.outcome or 'ERROR'} answer={interaction.answer!r} "
                     f"error={interaction.error_message!r}"
@@ -314,7 +314,7 @@ class LowSystemMock(Node):
                         "not retrying"
                     )
                     return None
-                self.get_logger().info(
+                self.get_logger().debug(
                     f"[ACTION_B] attempt {attempt} rejected as {reason}; "
                     "retrying without queue"
                 )

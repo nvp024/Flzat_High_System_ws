@@ -55,7 +55,7 @@ def generate_launch_description():
         Node(
             package="flzat_speech",
             executable="tts_node",
-            name="tts_node",
+            name="speech_output",
             output="screen",
             condition=IfCondition(LaunchConfiguration("run_tts_node")),
             parameters=[speech_parameters("tts")],

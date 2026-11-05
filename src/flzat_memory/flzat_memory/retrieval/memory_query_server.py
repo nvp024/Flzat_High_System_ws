@@ -42,7 +42,7 @@ class MemoryQueryNode(Node):
     """Serve semantic queries against one completed, immutable build session."""
 
     def __init__(self) -> None:
-        super().__init__("memory_query_node")
+        super().__init__("knowledge_server")
         self._declare_parameters()
         environment_id = self._safe_id("environment_id")
         map_id = self._string_parameter("map_id").strip()
@@ -64,7 +64,7 @@ class MemoryQueryNode(Node):
         elif embedding_backend == "deterministic_test":
             embedder = DeterministicTestEmbedder()
             self.get_logger().warn(
-                "Using deterministic_test embeddings; semantic ranking is not "
+                "[RAG] Using deterministic_test embeddings; semantic ranking is not "
                 "representative of production."
             )
         else:
@@ -99,7 +99,7 @@ class MemoryQueryNode(Node):
         )
         self._publish_status()
         self.get_logger().info(
-            "Read-only memory ready: "
+            "[RAG] Ready; "
             f"environment={self._manifest.environment_id}, "
             f"map={self._manifest.map_id}, objects={self._reader.object_count}"
         )
@@ -150,7 +150,7 @@ class MemoryQueryNode(Node):
             response.objects = []
             response.cosine_scores = []
             response.error_message = str(exc)
-            self.get_logger().warn(f"Memory query rejected: {exc}")
+            self.get_logger().warn(f"[RAG] Query rejected: {exc}")
         return response
 
     def _to_message(self, record) -> MemoryObject:

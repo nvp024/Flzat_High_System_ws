@@ -7,6 +7,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument("log_level", default_value="info"),
         DeclareLaunchArgument("camera_index", default_value="0"),
         DeclareLaunchArgument("camera_width", default_value="640"),
         DeclareLaunchArgument("camera_height", default_value="480"),
@@ -16,7 +17,8 @@ def generate_launch_description():
         Node(
             package="flzat_vision_context",
             executable="camera_node",
-            name="camera_node",
+            arguments=["--ros-args", "--log-level", LaunchConfiguration("log_level")],
+            name="perception",
             output="screen",
             emulate_tty=True,
             parameters=[{

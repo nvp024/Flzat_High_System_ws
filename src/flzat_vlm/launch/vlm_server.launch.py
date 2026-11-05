@@ -7,6 +7,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument("log_level", default_value="info"),
         DeclareLaunchArgument("backend", default_value="qwen3_vl"),
         DeclareLaunchArgument(
             "model_id",
@@ -28,7 +29,8 @@ def generate_launch_description():
         Node(
             package="flzat_vlm",
             executable="vlm_node",
-            name="vlm_node",
+            arguments=["--ros-args", "--log-level", LaunchConfiguration("log_level")],
+            name="qwen_inference",
             output="screen",
             emulate_tty=True,
             parameters=[{

@@ -11,6 +11,8 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 
 from flzat_high_interfaces.action import RunVlm, SpeechToText, TextToSpeech
 
@@ -28,6 +30,7 @@ class FakeSttServer(Node):
             cancel_callback=lambda _goal: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup(),
         )
+        self.get_logger().info("[STT] Ready; backend=fake.")
 
     def _execute(self, goal_handle):
         result = SpeechToText.Result()
@@ -67,6 +70,13 @@ class FakeVlmServer(Node):
         self.declare_parameter("second_response_text", "")
         self._response_lock = threading.Lock()
         self._response_index = 0
+        self._raw_response_pub = self.create_publisher(
+            String, "/vlm/raw_response",
+            QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
         self._server = ActionServer(
             self,
             RunVlm,
@@ -76,6 +86,7 @@ class FakeVlmServer(Node):
             cancel_callback=lambda _goal: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup(),
         )
+        self.get_logger().info("[VLM] Ready; backend=fake; responses are configured.")
 
     @staticmethod
     def _goal(request) -> GoalResponse:
@@ -111,10 +122,15 @@ class FakeVlmServer(Node):
             result.success = False
             result.response_text = ""
             result.error_message = "configured fake failure"
+            self.get_logger().error(f"[VLM] {result.request_id}: configured fake failure")
             return result
         result.success = True
         result.response_text = self._next_response()
         result.error_message = ""
+        self._raw_response_pub.publish(String(data=result.response_text))
+        self.get_logger().debug(
+            f"VLM {result.request_id} fake response: {result.response_text!r}"
+        )
         if goal_handle.is_cancel_requested:
             goal_handle.abort()
         else:
@@ -164,6 +180,7 @@ class FakeTtsServer(Node):
             cancel_callback=lambda _goal: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup(),
         )
+        self.get_logger().info("[TTS] Ready; backend=fake.")
 
     @staticmethod
     def _goal(request) -> GoalResponse:

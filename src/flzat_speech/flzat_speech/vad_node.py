@@ -10,8 +10,10 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool
 from std_msgs.msg import Header
 
@@ -286,7 +288,7 @@ class VadNode(Node):
             voice_state_qos,
         )
 
-        self.get_logger().info(f"Loading Silero-VAD model from: {jit_path}")
+        self.get_logger().debug(f"Loading Silero-VAD model from: {jit_path}")
         self._vad_model = _load_vad_model(jit_path)
         self._vad_stream = _VADStream(
             self._vad_model,
@@ -294,7 +296,7 @@ class VadNode(Node):
             silence_ms,
         )
         effective_silence_ms = self._vad_stream._silence_chunks * chunk_ms
-        self.get_logger().info(
+        self.get_logger().debug(
             f"VAD model ready — endpoint silence={effective_silence_ms:.0f} ms."
         )
 
@@ -303,7 +305,7 @@ class VadNode(Node):
 
         self._timer = self.create_timer(self.TIMER_PERIOD_S, self._timer_callback)
         self.get_logger().info(
-            f"VadNode started — listening on microphone '{mic_device}' at {SAMPLE_RATE} Hz."
+            f"[VAD] Ready; microphone={mic_device}; sample_rate={SAMPLE_RATE}Hz."
         )
 
     def _on_tts_active(self, msg: Bool) -> None:
@@ -336,7 +338,7 @@ class VadNode(Node):
         if dropped_chunks:
             self._vad_stream.discard_until_silence()
             self.get_logger().warn(
-                f"Microphone discontinuity/backlog: discarded {dropped_chunks} chunk(s); reset VAD."
+                f"[VAD] Microphone backlog: discarded {dropped_chunks} chunk(s); reset VAD."
             )
         if chunk is None:
             return
@@ -347,10 +349,10 @@ class VadNode(Node):
 
         event, frames = result
         if event == "start":
-            self.get_logger().info("🟢 Voice detected — listening …")
+            self.get_logger().info("[VAD] 🟢 Voice detected — listening …")
         elif event == "max_duration":
             self.get_logger().warn(
-                "Speech too long — discarded utterance; waiting for silence."
+                "[VAD] Speech too long; discarded utterance; waiting for silence."
             )
         elif event == "end":
             self._publish_segment(frames)
@@ -381,18 +383,21 @@ class VadNode(Node):
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    # Keep the context alive until microphone cleanup and shutdown logging finish.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     try:
         node = VadNode()
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        if node is not None:
-            node.get_logger().info("VadNode shutting down …")
+    except (KeyboardInterrupt, ExternalShutdownException):
+        if node is not None and rclpy.ok():
+            node.get_logger().info("[VAD] Shutting down…")
     finally:
-        if node is not None:
-            node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node is not None:
+                node.destroy_node()
+        finally:
+            rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

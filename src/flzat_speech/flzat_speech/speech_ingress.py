@@ -20,7 +20,7 @@ from flzat_high_interfaces.msg import SpeechAudio, SpeechTranscript
 
 class SpeechIngressNode(Node):
     def __init__(self, *, echo: bool = False) -> None:
-        super().__init__("audio_loopback_node" if echo else "speech_ingress")
+        super().__init__("audio_loopback_node" if echo else "speech_input")
         self._lock = threading.RLock()
         self._busy = False
         self._pending = None
@@ -58,12 +58,12 @@ class SpeechIngressNode(Node):
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         self.get_logger().info(
-            "Speech ready: VAD → STT → " + ("TTS echo." if echo else "transcript topic.")
+            "[STT] Speech input ready; " + ("mode=loopback." if echo else "mode=pipeline.")
         )
 
     def _on_audio(self, message: SpeechAudio) -> None:
         if not message.audio_data or message.sample_rate != 16_000:
-            self.get_logger().warn("Ignored empty or non-16 kHz speech audio.")
+            self.get_logger().warn("[STT] Ignored empty or non-16 kHz speech audio.")
             return
         with self._lock:
             if not (message.header.stamp.sec or message.header.stamp.nanosec):
@@ -96,7 +96,7 @@ class SpeechIngressNode(Node):
                 lambda future: self._on_goal(serial, future)
             )
         except Exception as exc:
-            self.get_logger().error(f"{kind} dispatch failed: {exc}")
+            self.get_logger().error(f"[{kind}] Dispatch failed: {exc}")
             self._complete()
 
     def _on_goal(self, serial: int, future) -> None:
@@ -108,7 +108,7 @@ class SpeechIngressNode(Node):
                         self._cancel(handle)
                     return
                 if not handle.accepted:
-                    self.get_logger().warn(f"{self._kind} goal rejected.")
+                    self.get_logger().warn(f"[{self._kind}] Goal rejected.")
                     self._complete()
                     return
                 self._handle = handle
@@ -117,7 +117,7 @@ class SpeechIngressNode(Node):
                 )
             except Exception as exc:
                 if self._is_current(serial):
-                    self.get_logger().error(f"{self._kind} goal failed: {exc}")
+                    self.get_logger().error(f"[{self._kind}] Goal failed: {exc}")
                     self._complete()
 
     def _on_result(self, serial: int, future) -> None:
@@ -127,12 +127,19 @@ class SpeechIngressNode(Node):
             try:
                 response = future.result()
                 if response.status != GoalStatus.STATUS_SUCCEEDED:
-                    self.get_logger().warn(f"{self._kind} failed: status={response.status}.")
+                    # STT server reports the rejection/inference error itself.
+                    # Preserve unusual transport outcomes at WARN.
+                    log = (
+                        self.get_logger().debug
+                        if self._kind == "STT" and response.status == GoalStatus.STATUS_ABORTED
+                        else self.get_logger().warn
+                    )
+                    log(f"[{self._kind}] Failed: status={response.status}.")
                 elif self._kind == "STT":
                     transcript = response.result.transcript.strip()
                     if transcript and any(char.isalnum() for char in transcript):
                         if self._tts_client is not None:
-                            self.get_logger().info(f"Audio transcript: '{transcript}'")
+                            self.get_logger().info(f"[STT] Transcript: {transcript!r}")
                             goal = TextToSpeech.Goal()
                             goal.text = transcript
                             self._request(self._tts_client, goal, "TTS")
@@ -141,18 +148,18 @@ class SpeechIngressNode(Node):
                             header=self._audio_header, transcript=transcript
                         ))
                     else:
-                        self.get_logger().warn("STT returned no usable transcript.")
+                        self.get_logger().warn("[STT] No usable transcript returned.")
                 elif not response.result.success:
-                    self.get_logger().warn("TTS did not complete successfully.")
+                    self.get_logger().warn("[TTS] Playback did not complete successfully.")
             except Exception as exc:
-                self.get_logger().error(f"{self._kind} result failed: {exc}")
+                self.get_logger().error(f"[{self._kind}] Result failed: {exc}")
             self._complete()
 
     def _cancel(self, handle) -> None:
         try:
             handle.cancel_goal_async()
         except Exception as exc:
-            self.get_logger().warn(f"Could not cancel speech goal: {exc}")
+            self.get_logger().warn(f"[{self._kind}] Could not cancel goal: {exc}")
 
     def _is_current(self, serial: int) -> bool:
         self._check_timeout()
@@ -162,7 +169,7 @@ class SpeechIngressNode(Node):
         with self._lock:
             if not self._busy or time.monotonic() < self._deadline:
                 return
-            self.get_logger().warn(f"{self._kind} timed out; discarded result and queued audio.")
+            self.get_logger().warn(f"[{self._kind}] Timed out; discarded result and queued audio.")
             handle = self._handle
             self._pending = None
             self._complete()
@@ -181,7 +188,7 @@ class SpeechIngressNode(Node):
             if time.monotonic() - received_at <= self._max_age:
                 self._dispatch(message)
             else:
-                self.get_logger().warn("Discarded stale pending speech audio.")
+                self.get_logger().warn("[STT] Discarded stale pending speech audio.")
 
     def destroy_node(self) -> None:
         self._stt_client.destroy()

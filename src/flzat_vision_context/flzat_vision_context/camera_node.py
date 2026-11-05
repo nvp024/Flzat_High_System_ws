@@ -38,7 +38,7 @@ class CameraNode(Node):
     """Non-blocking camera capture and nearest-frame service."""
 
     def __init__(self) -> None:
-        super().__init__("camera_node")
+        super().__init__("perception")
 
         self._declare_parameters()
         camera_index = self._integer_parameter("camera_index")
@@ -109,8 +109,8 @@ class CameraNode(Node):
         self._capture_thread.start()
         self._processing_thread.start()
         self._stats_timer = self.create_timer(5.0, self._report_stats)
-        self.get_logger().info(
-            f"Vision context started: camera={camera_index}, "
+        self.get_logger().debug(
+            f"[CAMERA] Capture started; camera={camera_index}, "
             f"requested={self._camera_width}x{self._camera_height} "
             f"@ {self._camera_fps:.1f} FPS, buffer={buffer_duration_s:.1f} s."
         )
@@ -149,7 +149,7 @@ class CameraNode(Node):
                 now = time.monotonic()
                 if now - last_open_error_log >= 10.0:
                     self.get_logger().error(
-                        f"Cannot open camera index {camera_index}; retrying."
+                        f"[CAMERA] Cannot open camera index {camera_index}; retrying."
                     )
                     last_open_error_log = now
                 self._stop_event.wait(self._retry_s)
@@ -168,8 +168,8 @@ class CameraNode(Node):
             actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = capture.get(cv2.CAP_PROP_FPS)
             self.get_logger().info(
-                f"Camera opened: {actual_width}x{actual_height} "
-                f"@ {actual_fps:.1f} FPS."
+                f"[CAMERA] Ready; resolution={actual_width}x{actual_height}; "
+                f"fps={actual_fps:.1f}."
             )
 
             consecutive_failures = 0
@@ -182,7 +182,7 @@ class CameraNode(Node):
                     consecutive_failures += 1
                     if consecutive_failures >= 10:
                         self.get_logger().error(
-                            "Camera read failed repeatedly; reopening device."
+                            "[CAMERA] Read failed repeatedly; reopening device."
                         )
                         break
                     continue
@@ -235,7 +235,7 @@ class CameraNode(Node):
             try:
                 self._process_frame(captured)
             except Exception as exc:
-                self.get_logger().error(f"Frame processing failed: {exc}")
+                self.get_logger().error(f"[CAMERA] Frame processing failed: {exc}")
 
     def _process_frame(self, captured: CapturedFrame) -> None:
         jpeg_data = self._encode_jpeg(captured.image)
@@ -365,7 +365,7 @@ def main(args=None) -> None:
         rclpy.spin(node)
     except KeyboardInterrupt:
         if node is not None:
-            node.get_logger().info("CameraNode shutting down …")
+            node.get_logger().info("[CAMERA] Shutting down…")
     finally:
         if node is not None:
             node.destroy_node()

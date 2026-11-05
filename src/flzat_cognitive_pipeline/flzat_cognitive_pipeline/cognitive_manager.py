@@ -84,6 +84,7 @@ class RuntimeRequest:
     handoff_path: str = ""
     handoff_goal_handle: object | None = None
     handoff_cancel_requested: bool = False
+    vlm_sent_ns: int = 0
 
 
 @dataclass
@@ -108,7 +109,7 @@ class CognitiveManagerNode(Node):
     """Connect speech, RAG, prompt, VLM, validation, artifacts and Low System."""
 
     def __init__(self) -> None:
-        super().__init__("cognitive_manager")
+        super().__init__("vlm_brain")
         self._cb_group = ReentrantCallbackGroup()
         self._lock = threading.RLock()
         self._declare_parameters()
@@ -276,7 +277,7 @@ class CognitiveManagerNode(Node):
             callback_group=self._cb_group,
         )
         self.get_logger().info(
-            "Cognitive pipeline ready: "
+            "[BRAIN] Started; "
             f"run={self._tasks.run_id}, environment={self._environment_id}, "
             f"map={self._map_id}, "
             "frame_source=/vision/get_frame_near."
@@ -328,7 +329,7 @@ class CognitiveManagerNode(Node):
     ) -> None:
         value = transcript.strip()
         if not is_usable_transcript(value):
-            self.get_logger().warn("Ignored input without a usable transcript.")
+            self.get_logger().warn("[BRAIN] Ignored input without a usable transcript.")
             return
         if is_stop_command(value):
             self._on_cancel(String(data=""))
@@ -338,10 +339,10 @@ class CognitiveManagerNode(Node):
             if interaction is not None and interaction.listening:
                 interaction.answer = value
                 interaction.listening = False
-                interaction.answer_event.set()
                 self.get_logger().info(
-                    f"[INTERACTION] {interaction.interaction_id}: answer received"
+                    f"[BRAIN] {interaction.interaction_id}: user={value!r}"
                 )
+                interaction.answer_event.set()
                 return
             busy_reason = ""
             if interaction is not None or self._interaction_reserved:
@@ -377,7 +378,7 @@ class CognitiveManagerNode(Node):
     ) -> None:
         with self._lock:
             if self._active is not None:
-                self.get_logger().warn("Ignored transcript while a request is active.")
+                self.get_logger().warn("[BRAIN] Ignored transcript while a request is active.")
                 return
             try:
                 waiting_id = self._tasks.waiting_task_id
@@ -395,7 +396,7 @@ class CognitiveManagerNode(Node):
                     )
                     self._waiting_deadlines.pop(waiting.task_id, None)
                     self._publish_status(waiting, "UNRESOLVED_ANSWER")
-                self.get_logger().warn(f"Transcript rejected: {exc}")
+                self.get_logger().warn(f"[BRAIN] Transcript rejected: {exc}")
                 return
             self._waiting_deadlines.pop(task.task_id, None)
             runtime = RuntimeRequest(
@@ -410,6 +411,7 @@ class CognitiveManagerNode(Node):
             )
             self._telemetry.begin(task.request_id, task.task_id, source)
             self._active = runtime
+            self.get_logger().info(f"[BRAIN] {task.request_id}: user={transcript!r}")
         try:
             self._write_initial_artifacts(runtime)
             self._telemetry.mark(task.request_id, "request_artifacts")
@@ -464,7 +466,7 @@ class CognitiveManagerNode(Node):
                 self._memory_candidate(value, float(score))
                 for value, score in zip(response.objects, response.cosine_scores)
             ]
-            self.get_logger().info(
+            self.get_logger().debug(
                 f"[RAG] {runtime.task.task_id}: {len(candidates)} result(s)"
             )
             snapshot = self._context_manager.build_snapshot(
@@ -642,6 +644,11 @@ class CognitiveManagerNode(Node):
         goal.prompt_version = prompt.version
         goal.prompt_hash = prompt.prompt_hash
         task_id, request_id = runtime.task.task_id, runtime.task.request_id
+        runtime.vlm_sent_ns = time.monotonic_ns()
+        self.get_logger().info(
+            f"[VLM] {request_id}: processing; "
+            f"image={'yes' if runtime.frame.data else 'no'}; attempt={attempt}"
+        )
         future = self._vlm_client.send_goal_async(goal)
         future.add_done_callback(
             lambda completed: self._on_vlm_goal(
@@ -758,6 +765,16 @@ class CognitiveManagerNode(Node):
                 },
             )
             self._telemetry.mark(request_id, "validated_artifact")
+            if validated.kind == OutcomeKind.NEEDS_CLARIFICATION:
+                decision_summary = "clarification"
+            elif validated.kind == OutcomeKind.RESPONSE_ONLY:
+                decision_summary = "speech"
+            else:
+                decision_summary = "speech+goal" if validated.reply else "goal"
+            elapsed_s = (time.monotonic_ns() - runtime.vlm_sent_ns) / 1_000_000_000
+            self.get_logger().info(
+                f"[BRAIN] {request_id}: decision={decision_summary}; vlm_roundtrip={elapsed_s:.2f}s"
+            )
             self._handle_validated(runtime, validated)
         except Exception as exc:
             self._reject(runtime, f"VLM result processing failed: {exc}")
@@ -793,6 +810,11 @@ class CognitiveManagerNode(Node):
         if time.monotonic_ns() >= runtime.deadline_ns:
             self._time_out(runtime, "request deadline before output repair")
             return
+        self.get_logger().warn(
+            f"[VLM] {runtime.task.request_id}: invalid output; "
+            f"repair {repair_number}/{self._repair_policy.max_repair_attempts}"
+        )
+        self.get_logger().debug(f"Validation error: {validation_error}")
         base_prompt = runtime.base_prompt
         if base_prompt is None or runtime.frame is None:
             self._reject(runtime, "repair cannot reuse the frozen request")
@@ -843,7 +865,7 @@ class CognitiveManagerNode(Node):
                     self._publish_status(task, "UNRESOLVED_ANSWER")
                     self._finish_metrics(task.request_id, "unresolved_answer")
                     self.get_logger().warn(
-                        f"Clarification limit reached for {task.task_id}."
+                        f"[BRAIN] {task.task_id}: clarification limit reached."
                     )
                     return
                 self._tasks.wait_for_clarification(task, validated.reply)
@@ -955,6 +977,7 @@ class CognitiveManagerNode(Node):
                 runtime.handoff_goal_handle = handle
                 self._telemetry.mark(request_id, "action_a_accepted")
                 cancel_requested = runtime.handoff_cancel_requested
+                self.get_logger().info(f"[ACTION_A] {task_id}: accepted")
             handle.get_result_async().add_done_callback(
                 lambda done: self._on_intent_result(task_id, request_id, done)
             )
@@ -972,7 +995,7 @@ class CognitiveManagerNode(Node):
         detail = str(message.feedback.detail).strip()
         if stage not in HANDLE_INTENT_STAGES:
             self.get_logger().warn(
-                f"Ignored unsupported Action A feedback stage: {stage!r}"
+                f"[ACTION_A] Ignored unsupported feedback stage: {stage!r}"
             )
             return
         self._publish_action_event(
@@ -1046,7 +1069,7 @@ class CognitiveManagerNode(Node):
             self._active = None
             self._publish_status(runtime.task, reason)
             self._finish_metrics(runtime.task.request_id, "action_a_transport_failed")
-        self.get_logger().error(reason)
+        self.get_logger().error(f"[ACTION_A] {runtime.task.task_id}: {reason}")
         self._publish_ready_if_available()
 
     def _on_cancel(self, message: String) -> None:
@@ -1186,7 +1209,7 @@ class CognitiveManagerNode(Node):
                 )
             return GoalResponse.ACCEPT
         except Exception as exc:
-            self.get_logger().warn(f"Rejected Action B goal: {exc}")
+            self.get_logger().warn(f"[ACTION_B] Rejected goal: {exc}")
             return GoalResponse.REJECT
 
     def _on_ask_user_cancel(self, _goal_handle) -> CancelResponse:
@@ -1255,6 +1278,9 @@ class CognitiveManagerNode(Node):
                 session.answer_event.clear()
                 session.listening = True
                 goal_handle.publish_feedback(feedback)
+                self.get_logger().info(
+                    f"[ACTION_B] {session.interaction_id}: listening; waiting for user answer"
+                )
                 while not session.answer_event.wait(timeout=0.05):
                     if goal_handle.is_cancel_requested:
                         session.listening = False
@@ -1294,7 +1320,7 @@ class CognitiveManagerNode(Node):
                 if terminal is not None:
                     return terminal
         except Exception as exc:
-            self.get_logger().error(f"Action B execution failed: {exc}")
+            self.get_logger().error(f"[ACTION_B] Execution failed: {exc}")
             try:
                 goal_handle.abort()
             except Exception:
@@ -1344,7 +1370,7 @@ class CognitiveManagerNode(Node):
                 return "TIMEOUT"
         if not bool(result["success"]):
             self.get_logger().warn(
-                f"Action B TTS failed: {str(result['error'])}"
+                f"[ACTION_B] TTS failed: {str(result['error'])}"
             )
             return "FAILED"
         return "COMPLETED"
@@ -1371,14 +1397,20 @@ class CognitiveManagerNode(Node):
         goal_handle.abort()
         return self._ask_user_result(error="TTS_UNAVAILABLE_OR_FAILED")
 
-    @staticmethod
     def _ask_user_result(
-        *, outcome: str = "", answer: str = "", error: str = ""
+        self, *, outcome: str = "", answer: str = "", error: str = ""
     ) -> AskUser.Result:
         result = AskUser.Result()
         result.outcome = outcome
         result.answer = answer
         result.error_message = error
+        session = self._interaction
+        identifier = session.interaction_id if session else "unassigned"
+        message = f"[ACTION_B] {identifier}: {outcome or error or 'CANCELED'}"
+        if error:
+            self.get_logger().warn(message)
+        else:
+            self.get_logger().info(message)
         return result
 
     def _on_timer(self) -> None:
@@ -1426,7 +1458,7 @@ class CognitiveManagerNode(Node):
             self._active = None
             self._publish_status(runtime.task, reason)
             self._finish_metrics(runtime.task.request_id, "rejected")
-        self.get_logger().error(reason)
+        self.get_logger().error(f"[BRAIN] {runtime.task.request_id}: {reason}")
 
     def _current(self, task_id: str, request_id: str) -> RuntimeRequest | None:
         with self._lock:
@@ -1456,15 +1488,8 @@ class CognitiveManagerNode(Node):
         serialized = canonical_json(payload)
         self._status_pub.publish(String(data=serialized))
         visible_states = {
-            PipelineState.CONTEXT_RETRIEVAL,
             PipelineState.WAITING_CLARIFICATION,
-            PipelineState.RESPONSE_ONLY,
-            PipelineState.HANDOFF_PENDING,
-            PipelineState.HANDOFF_ACCEPTED,
-            PipelineState.LOW_RUNNING,
-            PipelineState.REFUSED,
             PipelineState.SUCCEEDED,
-            PipelineState.FAILED,
             PipelineState.CANCELLED,
             PipelineState.TIMED_OUT,
         }
@@ -1479,7 +1504,7 @@ class CognitiveManagerNode(Node):
             }:
                 detail = f" ({reason})"
             self.get_logger().info(
-                f"[STATUS] {task.task_id}: {task.state.value}{detail}"
+                f"[BRAIN] {task.task_id}: state={task.state.value}{detail}"
             )
         self.get_logger().debug(f"HIGH_STATUS {serialized}")
 
@@ -1511,7 +1536,7 @@ class CognitiveManagerNode(Node):
         }
         self._status_pub.publish(String(data=canonical_json(payload)))
         self.get_logger().info(
-            f"[BUSY] rejected {event}: {reason}; queued=false"
+            f"[BRAIN] Busy; rejected={event}; reason={reason}; queued=false"
         )
 
     def _publish_ready_if_available(self) -> None:
@@ -1533,7 +1558,7 @@ class CognitiveManagerNode(Node):
                 "queued": False,
             }
         self._status_pub.publish(String(data=canonical_json(payload)))
-        self.get_logger().info("[READY] High System can accept a new request.")
+        self.get_logger().info("[BRAIN] Ready for user input.")
 
     def _publish_action_event(
         self,
@@ -1560,7 +1585,18 @@ class CognitiveManagerNode(Node):
         }
         self._status_pub.publish(String(data=canonical_json(payload)))
         summary = stage or outcome or detail
-        self.get_logger().info(f"[{event}] {summary}".rstrip())
+        identifier = interaction_id or (task.task_id if task else handoff_id)
+        # A's result is summarized once by _finish_metrics. Full event payloads
+        # and feedback remain available on ROS topics and at DEBUG.
+        self.get_logger().debug(f"HIGH_ACTION_EVENT {canonical_json(payload)}")
+        if event not in {"ACTION_A_FEEDBACK", "ACTION_A_RESULT", "ACTION_B_FINISHED"}:
+            if event.startswith("ACTION_B_"):
+                component, event_name = "ACTION_B", event.removeprefix("ACTION_B_")
+            else:
+                component, event_name = "ACTION_A", event.removeprefix("ACTION_A_")
+            self.get_logger().info(
+                f"[{component}] {identifier}: {event_name.lower()}; {summary}".rstrip()
+            )
 
     def _finish_metrics(self, request_id: str, outcome: str) -> None:
         payload = self._telemetry.finish(request_id, outcome)
@@ -1568,25 +1604,14 @@ class CognitiveManagerNode(Node):
             return
         serialized = canonical_json(payload)
         self._metrics_pub.publish(String(data=serialized))
-        phase_ms = payload.get("phase_ms", {})
-        rag_ms = phase_ms.get("rag_context") if isinstance(phase_ms, dict) else None
-        vlm_ms = None
-        if isinstance(phase_ms, dict):
-            vlm_values = [
-                value
-                for key, value in phase_ms.items()
-                if key.startswith("vlm_inference_")
-                and isinstance(value, (int, float))
-            ]
-            if vlm_values:
-                vlm_ms = sum(vlm_values)
-        timing = [f"total={float(payload['total_ms']):.1f} ms"]
-        if isinstance(rag_ms, (int, float)):
-            timing.append(f"rag={float(rag_ms):.1f} ms")
-        if vlm_ms is not None:
-            timing.append(f"vlm={vlm_ms:.1f} ms")
+        component = (
+            "ACTION_A"
+            if outcome.upper() in HANDLE_INTENT_OUTCOMES or outcome == "action_a_transport_failed"
+            else "BRAIN"
+        )
         self.get_logger().info(
-            f"[METRICS] {payload['task_id']}: {outcome}; " + ", ".join(timing)
+            f"[{component}] {payload['request_id']}: result={outcome.upper()}; "
+            f"high={float(payload['total_ms']) / 1000:.2f}s"
         )
         self.get_logger().debug(f"HIGH_METRICS {serialized}")
 
@@ -1648,11 +1673,11 @@ class CognitiveManagerNode(Node):
                 if not allow_queue or on_complete is not None:
                     return False
                 if self._speech_pending is not None:
-                    self.get_logger().warn("TTS busy; replaced older queued reply.")
+                    self.get_logger().warn("[TTS] Busy; replaced older queued reply.")
                 self._speech_pending = (value, time.monotonic())
                 return True
             if not self._tts_client.server_is_ready():
-                self.get_logger().warn("TTS unavailable; speech was not played.")
+                self.get_logger().warn("[TTS] Unavailable; speech was not played.")
                 return False
             self._speech_serial += 1
             serial = self._speech_serial
@@ -1660,11 +1685,12 @@ class CognitiveManagerNode(Node):
             self._speech_completion = on_complete
             self._speech_deadline = time.monotonic() + self._speech_timeout_s
             try:
+                self.get_logger().info(f"[TTS] Speaking: {value!r}")
                 self._tts_client.send_goal_async(TextToSpeech.Goal(text=value)).add_done_callback(
                     lambda future: self._on_speech_goal(serial, future)
                 )
             except Exception as exc:
-                self.get_logger().warn(f"TTS dispatch failed: {exc}")
+                self.get_logger().warn(f"[TTS] Dispatch failed: {exc}")
                 self._finish_speech(False, f"dispatch failed: {exc}")
                 return False
             return True
@@ -1679,7 +1705,7 @@ class CognitiveManagerNode(Node):
                         handle.cancel_goal_async()
                     return
                 if not handle.accepted:
-                    self.get_logger().warn("TTS rejected reply; speech was not played.")
+                    self.get_logger().warn("[TTS] Rejected reply; speech was not played.")
                     self._finish_speech(False, "goal rejected")
                     return
                 self._speech_handle = handle
@@ -1687,7 +1713,7 @@ class CognitiveManagerNode(Node):
                     lambda result: self._on_speech_result(serial, result)
                 )
             except Exception as exc:
-                self.get_logger().warn(f"TTS goal failed: {exc}")
+                self.get_logger().warn(f"[TTS] Goal failed: {exc}")
                 if serial == self._speech_serial:
                     self._finish_speech(False, f"goal failed: {exc}")
 
@@ -1699,7 +1725,7 @@ class CognitiveManagerNode(Node):
             try:
                 response = future.result()
                 if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
-                    self.get_logger().warn(f"TTS reply failed: status={response.status}.")
+                    self.get_logger().warn(f"[TTS] Reply failed: status={response.status}.")
                     success = False
                     error = f"status={response.status}"
                 else:
@@ -1707,14 +1733,14 @@ class CognitiveManagerNode(Node):
                     success = True
                     error = ""
             except Exception as exc:
-                self.get_logger().warn(f"TTS result failed: {exc}")
+                self.get_logger().warn(f"[TTS] Result failed: {exc}")
                 success = False
                 error = f"result failed: {exc}"
             self._finish_speech(success, error)
 
     def _expire_speech(self) -> None:
         if self._speech_busy and time.monotonic() >= self._speech_deadline:
-            self.get_logger().warn("TTS response timed out; discarding queued speech.")
+            self.get_logger().warn("[TTS] Response timed out; discarding queued speech.")
             self._stop_speech()
 
     def _finish_speech(self, success: bool = True, error: str = "") -> None:
@@ -1727,13 +1753,13 @@ class CognitiveManagerNode(Node):
             try:
                 completion(success, error)
             except Exception as exc:
-                self.get_logger().warn(f"TTS completion callback failed: {exc}")
+                self.get_logger().warn(f"[TTS] Completion callback failed: {exc}")
         if pending is not None:
             text, received_at = pending
             if time.monotonic() - received_at < self._speech_timeout_s:
                 self._speak(text)
             else:
-                self.get_logger().warn("Discarded expired queued TTS reply.")
+                self.get_logger().warn("[TTS] Discarded expired queued reply.")
         else:
             self._publish_ready_if_available()
 
@@ -1748,7 +1774,7 @@ class CognitiveManagerNode(Node):
                 try:
                     handle.cancel_goal_async()
                 except Exception as exc:
-                    self.get_logger().warn(f"TTS cancellation failed: {exc}")
+                    self.get_logger().warn(f"[TTS] Cancellation failed: {exc}")
 
     def _remember_turn(self, runtime: RuntimeRequest, assistant: str) -> None:
         if not assistant.strip():
@@ -1760,7 +1786,7 @@ class CognitiveManagerNode(Node):
                 assistant,
             )
         except ValueError as exc:
-            self.get_logger().warn(f"Conversation turn was not stored: {exc}")
+            self.get_logger().warn(f"[BRAIN] Conversation turn was not stored: {exc}")
 
     def _write_initial_artifacts(self, runtime: RuntimeRequest) -> None:
         task = runtime.task

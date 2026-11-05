@@ -44,7 +44,8 @@ class StaticFrameServer(Node):
             "/vision/get_frame_near",
             self._get_frame,
         )
-        self.get_logger().info(f"Static frame provider ready: {source}.")
+        self.get_logger().info("[CAMERA] Ready; source=static.")
+        self.get_logger().debug(f"Static frame path: {source}.")
 
     @staticmethod
     def _load_image(image_path: str) -> tuple[bytes, str, str]:

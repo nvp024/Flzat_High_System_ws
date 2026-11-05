@@ -45,6 +45,7 @@ def test_action_a_calls_b_and_b_answer_does_not_create_a_new_task(tmp_path):
     thread = None
     try:
         manager = CognitiveManagerNode()
+        assert manager.get_name() == "vlm_brain"
         fake_vlm = FakeVlmServer()
         fake_vlm.set_parameters(
             [
@@ -85,11 +86,16 @@ def test_action_a_calls_b_and_b_answer_does_not_create_a_new_task(tmp_path):
             String, "/flzat/high_system/text_command", 10
         )
         status_events = []
+        raw_responses = []
         probe.create_subscription(
             String,
             "/flzat/high_system/status",
             lambda message: status_events.append(json.loads(message.data)),
             10,
+        )
+        probe.create_subscription(
+            String, "/vlm/raw_response",
+            lambda message: raw_responses.append(message.data), 10,
         )
         nodes.extend([manager, fake_vlm, fake_tts, low, probe])
         for node in nodes:
@@ -121,6 +127,9 @@ def test_action_a_calls_b_and_b_answer_does_not_create_a_new_task(tmp_path):
 
         assert manager._tasks._task_count == 1
         assert manager._interaction is None
+        wait_for(lambda: bool(raw_responses))
+        assert json.loads(raw_responses[0])["goal"]["description"] == "Bring the bottle to the user"
+        assert any(event.get("event") == "ACTION_A_FEEDBACK" for event in status_events)
         assert any(
             event.get("state") == "BUSY"
             and event.get("event") == "action_b_rejected"

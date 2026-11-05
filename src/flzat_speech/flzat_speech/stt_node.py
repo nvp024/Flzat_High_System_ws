@@ -171,7 +171,6 @@ class SttNode(Node):
         self._inference_done.set()
         self._shutting_down = False
 
-        self.get_logger().info("Loading Whisper model …")
         self.declare_parameter("whisper_model_path", _default_whisper_model_path())
         self.declare_parameter("language", "en")
         self.declare_parameter("beam_size", DEFAULT_BEAM_SIZE)
@@ -228,9 +227,10 @@ class SttNode(Node):
             )
         if not math.isfinite(self._min_avg_logprob):
             raise ValueError("Parameter 'min_avg_logprob' must be finite.")
-        self.get_logger().info(f"Whisper model path: {model_path}")
+        self.get_logger().info("[STT] Loading Whisper model.")
+        self.get_logger().debug(f"Whisper model path: {model_path}")
         self._stt_model = _load_stt_model(model_path)
-        self.get_logger().info(
+        self.get_logger().debug(
             f"Whisper model ready; language={self._language or 'auto'}; "
             f"beam_size={self._beam_size}; deterministic decoding enabled."
         )
@@ -244,41 +244,41 @@ class SttNode(Node):
             cancel_callback=self._cancel_callback,
             callback_group=self._cb_group,
         )
-        self.get_logger().info("SttNode ready — /stt_action active.")
+        self.get_logger().info(f"[STT] Ready; language={self._language or 'auto'}.")
 
     def _goal_callback(self, goal_request) -> GoalResponse:
         packet = goal_request.audio_packet
         sample_count = len(packet.audio_data)
         if sample_count == 0:
-            self.get_logger().warn("Rejected empty STT goal.")
+            self.get_logger().warn("[STT] Rejected empty goal.")
             return GoalResponse.REJECT
         if packet.sample_rate != self._expected_sample_rate:
             self.get_logger().warn(
-                f"Rejected STT goal with sample rate {packet.sample_rate}; "
+                f"[STT] Rejected goal with sample rate {packet.sample_rate}; "
                 f"expected {self._expected_sample_rate} Hz."
             )
             return GoalResponse.REJECT
         max_samples = int(self._expected_sample_rate * self._max_audio_duration_s)
         if sample_count > max_samples:
             self.get_logger().warn(
-                f"Rejected STT goal with {sample_count} samples; "
+                f"[STT] Rejected goal with {sample_count} samples; "
                 f"limit is {max_samples} ({self._max_audio_duration_s:.1f} s)."
             )
             return GoalResponse.REJECT
 
         with self._goal_lock:
             if self._goal_active or self._shutting_down:
-                self.get_logger().warn("Rejected STT goal because inference is already active.")
+                self.get_logger().warn("[STT] Rejected goal; inference is already active.")
                 return GoalResponse.REJECT
             self._goal_active = True
 
-        self.get_logger().info(
+        self.get_logger().debug(
             f"STT goal accepted: {sample_count} samples @ {packet.sample_rate} Hz"
         )
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle) -> CancelResponse:
-        self.get_logger().info("STT cancel request received.")
+        self.get_logger().info("[STT] Cancel requested.")
         return CancelResponse.ACCEPT
 
     def _execute_callback(self, goal_handle):
@@ -288,13 +288,13 @@ class SttNode(Node):
                 goal_handle.abort()
                 return SpeechToText.Result(transcript="")
             if goal_handle.is_cancel_requested:
-                self.get_logger().info("STT goal cancelled before inference started.")
+                self.get_logger().info("[STT] Cancelled before inference started.")
                 goal_handle.canceled()
                 result = SpeechToText.Result()
                 result.transcript = ""
                 return result
 
-            self.get_logger().info("Transcribing …")
+            self.get_logger().info("[STT] Transcribing …")
             audio_packet: SpeechAudio = goal_handle.request.audio_packet
             audio_i16 = np.array(audio_packet.audio_data, dtype=np.int16)
             audio_f32 = audio_i16.astype(np.float32) / 32768.0
@@ -318,13 +318,13 @@ class SttNode(Node):
             )
             if not transcript:
                 self.get_logger().warn(
-                    "Whisper result rejected: no sufficiently confident speech."
+                    "[STT] Rejected result; no sufficiently confident speech."
                 )
 
             # Whisper cannot be safely interrupted mid-inference. The action is
             # nevertheless marked cancelled as soon as that inference returns.
             if goal_handle.is_cancel_requested:
-                self.get_logger().info("STT goal cancelled after inference completed.")
+                self.get_logger().info("[STT] Cancelled after inference completed.")
                 goal_handle.canceled()
                 result = SpeechToText.Result()
                 result.transcript = ""
@@ -332,20 +332,20 @@ class SttNode(Node):
 
             feedback_msg.status = "inference_complete"
             goal_handle.publish_feedback(feedback_msg)
-            self.get_logger().info(f"[STT] '{transcript}'")
+            self.get_logger().debug(f"[STT] {transcript!r}")
             goal_handle.succeed()
             result = SpeechToText.Result()
             result.transcript = transcript
             return result
         except ValueError as exc:
-            self.get_logger().warn(f"Whisper utterance rejected: {exc}")
+            self.get_logger().warn(f"[STT] Rejected utterance: {exc}")
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
             else:
                 goal_handle.abort()
             return SpeechToText.Result(transcript="")
         except Exception as exc:
-            self.get_logger().error(f"STT inference failed: {exc}")
+            self.get_logger().error(f"[STT] Inference failed: {exc}")
             goal_handle.abort()
             result = SpeechToText.Result()
             result.transcript = ""
@@ -377,7 +377,7 @@ def main(args=None) -> None:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         if node is not None:
-            node.get_logger().info("SttNode shutting down …")
+            node.get_logger().info("[STT] Shutting down…")
     finally:
         if node is not None:
             node._shutting_down = True

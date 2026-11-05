@@ -24,6 +24,7 @@ DEFAULT_FAKE_RESPONSE = (
 
 
 def generate_launch_description():
+    log_arguments = ["--ros-args", "--log-level", LaunchConfiguration("log_level")]
     config = (
         get_package_share_directory("flzat_high_bringup")
         + "/config/high_system.yaml"
@@ -39,6 +40,7 @@ def generate_launch_description():
                 LaunchConfiguration("run_camera_node"),
             )
         ),
+        launch_arguments={"log_level": LaunchConfiguration("log_level")}.items(),
     )
     real_vlm = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -47,6 +49,7 @@ def generate_launch_description():
         ]),
         condition=UnlessCondition(LaunchConfiguration("use_fake_vlm")),
         launch_arguments={
+            "log_level": LaunchConfiguration("log_level"),
             "backend": LaunchConfiguration("vlm_backend"),
             "model_id": LaunchConfiguration("model_id"),
             "model_revision": LaunchConfiguration("model_revision"),
@@ -66,6 +69,11 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "log_level", default_value="info",
+            choices=["debug", "info", "warn", "error", "fatal"],
+            description="ROS node log verbosity; info is concise, debug includes details",
+        ),
         DeclareLaunchArgument("storage_root", default_value="~/.local/share/flzat/environment_memory"),
         DeclareLaunchArgument(
             "environment_id",
@@ -152,6 +160,7 @@ def generate_launch_description():
         Node(
             package="flzat_high_bringup",
             executable="static_frame_server",
+            arguments=log_arguments,
             name="static_frame_server",
             output="screen",
             condition=IfCondition(
@@ -162,7 +171,8 @@ def generate_launch_description():
         Node(
             package="flzat_memory",
             executable="memory_query_node",
-            name="memory_query_node",
+            arguments=log_arguments,
+            name="knowledge_server",
             output="screen",
             parameters=[config, {
                 "storage_root": LaunchConfiguration("storage_root"),
@@ -177,6 +187,7 @@ def generate_launch_description():
         Node(
             package="flzat_speech",
             executable="vad_node",
+            arguments=log_arguments,
             name="vad_node",
             output="screen",
             parameters=[speech_parameters("vad")],
@@ -190,6 +201,7 @@ def generate_launch_description():
         Node(
             package="flzat_speech",
             executable="stt_node",
+            arguments=log_arguments,
             name="stt_node",
             output="screen",
             condition=IfCondition(
@@ -203,7 +215,8 @@ def generate_launch_description():
         Node(
             package="flzat_speech",
             executable="tts_node",
-            name="tts_node",
+            arguments=log_arguments,
+            name="speech_output",
             output="screen",
             condition=IfCondition(
                 AndSubstitution(
@@ -216,6 +229,7 @@ def generate_launch_description():
         Node(
             package="flzat_high_bringup",
             executable="fake_stt_server",
+            arguments=log_arguments,
             name="fake_stt_server",
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_fake_speech")),
@@ -224,6 +238,7 @@ def generate_launch_description():
         Node(
             package="flzat_high_bringup",
             executable="fake_tts_server",
+            arguments=log_arguments,
             name="fake_tts_server",
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_fake_speech")),
@@ -231,7 +246,8 @@ def generate_launch_description():
         Node(
             package="flzat_speech",
             executable="speech_ingress",
-            name="speech_ingress",
+            arguments=log_arguments,
+            name="speech_input",
             output="screen",
             parameters=[speech_parameters("ingress")],
         ),
@@ -239,6 +255,7 @@ def generate_launch_description():
         Node(
             package="flzat_high_bringup",
             executable="fake_vlm_server",
+            arguments=log_arguments,
             name="fake_vlm_server",
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_fake_vlm")),
@@ -260,7 +277,8 @@ def generate_launch_description():
         Node(
             package="flzat_cognitive_pipeline",
             executable="cognitive_manager",
-            name="cognitive_manager",
+            arguments=log_arguments,
+            name="vlm_brain",
             output="screen",
             parameters=[config, {
                 "tts_timeout_s": ParameterValue(
@@ -288,6 +306,7 @@ def generate_launch_description():
         Node(
             package="flzat_high_bringup",
             executable="low_system_mock",
+            arguments=log_arguments,
             name="low_system_mock",
             output="screen",
             condition=IfCondition(LaunchConfiguration("use_low_mock")),
